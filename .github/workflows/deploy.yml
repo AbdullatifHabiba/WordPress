@@ -22,18 +22,16 @@ jobs:
         
     - name: Create build package
       run: |
-        # Create timestamped package
         DATE=$(date +%Y%m%d_%H%M%S)
-        PACKAGE_NAME="app_${DATE}.tar.gz"
+        PACKAGE_NAME="app_$DATE.tar.gz"
         
-        # Create package excluding unnecessary files
-        tar -czf $PACKAGE_NAME \
-          --exclude='.git' \
-          --exclude='.github' \
-          --exclude='.gitignore' \
-          --exclude='wp-config.php' \
-          --exclude='wp-content/uploads' \
-          .
+        tar -czf "$PACKAGE_NAME" \
+        --exclude='.git' \
+        --exclude='.github' \
+        --exclude='.gitignore' \
+        --exclude='wp-config.php' \
+        --exclude='wp-content/uploads' \
+        .
         
         echo "PACKAGE_NAME=$PACKAGE_NAME" >> $GITHUB_ENV
         
