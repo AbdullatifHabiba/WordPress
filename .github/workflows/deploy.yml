@@ -1,0 +1,148 @@
+name: Deploy WordPress to AWS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+        
+    - name: Create build package
+      run: |
+        # Create timestamped package
+        DATE=$(date +%Y%m%d_%H%M%S)
+        PACKAGE_NAME="app_${DATE}.tar.gz"
+        
+        # Create package excluding unnecessary files
+        tar -czf $PACKAGE_NAME \
+          --exclude='.git' \
+          --exclude='.github' \
+          --exclude='.gitignore' \
+          --exclude='wp-config.php' \
+          --exclude='wp-content/uploads' \
+          .
+        
+        echo "PACKAGE_NAME=$PACKAGE_NAME" >> $GITHUB_ENV
+        
+    - name: Upload to S3
+      run: |
+        # Upload to S3
+        aws s3 cp $PACKAGE_NAME s3://abdu-app/builds/
+        echo "S3_PATH=s3://abdu-app/builds/$PACKAGE_NAME" >> $GITHUB_ENV
+        
+    - name: Get Auto Scaling Group Instances
+      id: get-instances
+      run: |
+        # Get healthy instances from ASG
+        INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+          --auto-scaling-group-names Abdu-project-asg \
+          --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' \
+          --output text)
+        
+        if [ -z "$INSTANCE_IDS" ]; then
+          echo "No instances found in Auto Scaling Group!"
+          exit 1
+        fi
+        
+        echo "INSTANCE_IDS=$INSTANCE_IDS" >> $GITHUB_ENV
+        echo "Found instances: $INSTANCE_IDS"
+        
+    - name: Deploy to instances
+      run: |
+        # Create deployment script
+        cat > deploy.sh << 'DEPLOY_EOF'
+        #!/bin/bash
+        set -e  # Exit on error
+        
+        PACKAGE_NAME="$1"
+        
+        echo "Starting deployment of $PACKAGE_NAME"
+        
+        # Download from S3
+        aws s3 cp "s3://abdu-app/builds/$PACKAGE_NAME" /tmp/
+        
+        # Extract to temporary directory
+        EXTRACT_DIR="/tmp/app_extract_$(date +%s)"
+        mkdir -p "$EXTRACT_DIR"
+        tar -xzf "/tmp/$PACKAGE_NAME" -C "$EXTRACT_DIR"
+        
+        # Sync files to WordPress directory (preserve permissions)
+        rsync -av --delete \
+          --exclude='wp-config.php' \
+          --exclude='wp-content/uploads' \
+          --exclude='.git' \
+          "$EXTRACT_DIR/" /var/www/html/
+        
+        # Set proper permissions
+        chown -R nginx:nginx /var/www/html
+        find /var/www/html -type d -exec chmod 755 {} \;
+        find /var/www/html -type f -exec chmod 644 {} \;
+        
+        # Restart web server
+        systemctl restart nginx
+        
+        # Cleanup
+        rm -rf "/tmp/$PACKAGE_NAME" "$EXTRACT_DIR"
+        
+        echo "Deployment completed successfully"
+        DEPLOY_EOF
+        
+        # Deploy to each instance
+        for INSTANCE_ID in $INSTANCE_IDS; do
+          echo "🚀 Deploying to instance: $INSTANCE_ID"
+          
+          # Upload deployment script
+          aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "cat > /tmp/deploy.sh << '\''SCRIPT_EOF'\''",
+              "'"$(cat deploy.sh | sed 's/\\/\\\\/g' | sed 's/"/\\\"/g' | sed 's/\$/\\\$/g')"'",
+              "SCRIPT_EOF",
+              "chmod +x /tmp/deploy.sh",
+              "/tmp/deploy.sh '"$PACKAGE_NAME"'",
+              "rm -f /tmp/deploy.sh"
+            ]' \
+            --output text \
+            --query 'Command.CommandId'
+            
+          echo "✅ Deployment command sent to $INSTANCE_ID"
+        done
+        
+    - name: Verify deployment
+      run: |
+        # Wait a bit for deployment to complete
+        sleep 30
+        
+        # Check deployment status on each instance
+        for INSTANCE_ID in $INSTANCE_IDS; do
+          echo "🔍 Checking deployment on $INSTANCE_ID"
+          
+          # Get instance public IP (for testing)
+          PUBLIC_IP=$(aws ec2 describe-instances \
+            --instance-ids "$INSTANCE_ID" \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)
+          
+          if [ "$PUBLIC_IP" != "None" ]; then
+            # Test health check
+            if curl -s -f "http://$PUBLIC_IP/health.php" | grep -q "OK"; then
+              echo "✅ Instance $INSTANCE_ID is healthy"
+            else
+              echo "❌ Instance $INSTANCE_ID health check failed"
+            fi
+          fi
+        done
