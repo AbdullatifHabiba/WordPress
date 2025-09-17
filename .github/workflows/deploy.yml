@@ -206,7 +206,7 @@ jobs:
                 "rm -rf \"/tmp/$PACKAGE_NAME\" \"$EXTRACT_DIR\"",
                 "sudo rm -rf \"$BACKUP_DIR\" 2>/dev/null || true",
                 "",
-                "echo \"[$TIMESTAMP] ✅ Deployment completed successfully on $(hostname)\"",
+                "echo \"[$TIMESTAMP] ✅ Deployment completed and successfully on $(hostname)\"",
                 "",
                 "# Health check",
                 "sleep 3",
