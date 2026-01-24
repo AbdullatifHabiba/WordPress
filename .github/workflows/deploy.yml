@@ -101,20 +101,16 @@ jobs:
             echo "   Instance $INSTANCE_ID: $PRIVATE_IP"
           done
         
-      - name: Deploy to instances
+      - name: Create deployment script
         env:
           DB_NAME: ${{ secrets.DB_NAME }}
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_HOST: ${{ secrets.DB_HOST }}
         run: |
-          echo "🚀 Starting deployment to instances..."
+          echo "📝 Creating deployment script..."
           
-          SUCCESS_COUNT=0
-          TOTAL_INSTANCES=$(echo $INSTANCE_IDS | wc -w)
-          
-          # Create deployment script
-          cat > /tmp/deploy-script.sh << 'DEPLOY_SCRIPT'
+          cat > deploy-script.sh << 'DEPLOY_SCRIPT'
           #!/bin/bash
           set -e
           
@@ -171,16 +167,16 @@ jobs:
           # Configure database settings if wp-config.php doesn't exist
           if [ ! -f "/var/www/html/wp-config.php" ]; then
             echo "[$TIMESTAMP] Creating wp-config.php with database settings..."
-            cat > /tmp/wp-config.php << 'WPCONFIG'
+            cat > /tmp/wp-config.php << WPCONFIG
           <?php
-          define('DB_NAME', getenv('DB_NAME'));
-          define('DB_USER', getenv('DB_USER'));
-          define('DB_PASSWORD', getenv('DB_PASSWORD'));
-          define('DB_HOST', getenv('DB_HOST'));
+          define('DB_NAME', '$DB_NAME');
+          define('DB_USER', '$DB_USER');
+          define('DB_PASSWORD', '$DB_PASSWORD');
+          define('DB_HOST', '$DB_HOST');
           define('DB_CHARSET', 'utf8');
           define('DB_COLLATE', '');
           
-          $table_prefix = 'wp_';
+          \$table_prefix = 'wp_';
           define('WP_DEBUG', false);
           
           define('AUTH_KEY', 'put your unique phrase here');
@@ -198,12 +194,6 @@ jobs:
           
           require_once ABSPATH . 'wp-settings.php';
           WPCONFIG
-            
-            # Set environment variables for wp-config.php
-            export DB_NAME="$DB_NAME"
-            export DB_USER="$DB_USER"
-            export DB_PASSWORD="$DB_PASSWORD"
-            export DB_HOST="$DB_HOST"
             
             sudo mv /tmp/wp-config.php /var/www/html/wp-config.php
             echo "[$TIMESTAMP] wp-config.php created successfully"
@@ -264,17 +254,43 @@ jobs:
           fi
           DEPLOY_SCRIPT
           
+          # Upload script to S3
+          SCRIPT_NAME="deploy-script-$(date +%s).sh"
+          aws s3 cp deploy-script.sh s3://$S3_BUCKET/scripts/$SCRIPT_NAME
+          echo "SCRIPT_NAME=$SCRIPT_NAME" >> $GITHUB_ENV
+          echo "✅ Deployment script uploaded to S3"
+      
+      - name: Deploy to instances
+        env:
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_HOST: ${{ secrets.DB_HOST }}
+        run: |
+          echo "🚀 Starting deployment to instances..."
+          
+          SUCCESS_COUNT=0
+          TOTAL_INSTANCES=$(echo $INSTANCE_IDS | wc -w)
+          
           for INSTANCE_ID in $INSTANCE_IDS; do
             echo "🚀 Deploying to instance: $INSTANCE_ID"
             
-            # Read the script file
-            SCRIPT_CONTENT=$(cat /tmp/deploy-script.sh)
-            
-            # Send command via SSM with environment variables
+            # Send command via SSM - download and execute script from S3
             COMMAND_ID=$(aws ssm send-command \
               --instance-ids "$INSTANCE_ID" \
               --document-name "AWS-RunShellScript" \
-              --parameters "{\"commands\":[\"export DB_NAME='$DB_NAME'\",\"export DB_USER='$DB_USER'\",\"export DB_PASSWORD='$DB_PASSWORD'\",\"export DB_HOST='$DB_HOST'\",\"export S3_BUCKET='$S3_BUCKET'\",\"export PACKAGE_NAME='$PACKAGE_NAME'\",\"$SCRIPT_CONTENT\"]}" \
+              --parameters commands="[
+                \"export DB_NAME='$DB_NAME'\",
+                \"export DB_USER='$DB_USER'\",
+                \"export DB_PASSWORD='$DB_PASSWORD'\",
+                \"export DB_HOST='$DB_HOST'\",
+                \"export S3_BUCKET='$S3_BUCKET'\",
+                \"export PACKAGE_NAME='$PACKAGE_NAME'\",
+                \"aws s3 cp s3://$S3_BUCKET/scripts/$SCRIPT_NAME /tmp/deploy.sh\",
+                \"chmod +x /tmp/deploy.sh\",
+                \"/tmp/deploy.sh\",
+                \"rm -f /tmp/deploy.sh\"
+              ]" \
               --timeout-seconds 900 \
               --output text \
               --query 'Command.CommandId')
@@ -317,6 +333,9 @@ jobs:
                 --output text | tail -20
             fi
           done
+          
+          # Cleanup script from S3
+          aws s3 rm s3://$S3_BUCKET/scripts/$SCRIPT_NAME || true
           
           echo ""
           echo "📊 Deployment Summary:"
