@@ -269,6 +269,7 @@ jobs:
           # Upload script to S3
           SCRIPT_NAME="deploy-script-$(date +%s).sh"
           aws s3 cp deploy-script.sh s3://$S3_BUCKET/scripts/$SCRIPT_NAME
+          aws s3 cp deploy-script.sh s3://$S3_BUCKET/scripts/latest-deploy.sh
           echo "SCRIPT_NAME=$SCRIPT_NAME" >> $GITHUB_ENV
           echo "✅ Deployment script uploaded to S3"
       
@@ -358,18 +359,3 @@ jobs:
           else
             echo "✅ All deployments successful!"
           fi
-
-      - name: Trigger Instance Refresh
-        if: success()
-        run: |
-          echo "🔄 Triggering Auto Scaling Group instance refresh..."
-          
-          REFRESH_ID=$(aws autoscaling start-instance-refresh \
-            --auto-scaling-group-name $ASG_NAME \
-            --preferences '{"MinHealthyPercentage": 90, "InstanceWarmup": 300}' \
-            --query 'InstanceRefreshId' \
-            --output text)
-          
-          echo " Instance refresh started with ID: $REFRESH_ID "
-          echo "This will gradually replace instances with the updated launch template."
-          echo "Monitor progress in AWS Console or use: aws autoscaling describe-instance-refreshes --auto-scaling-group-name $ASG_NAME"
