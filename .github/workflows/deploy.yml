@@ -32,7 +32,8 @@ jobs:
           PACKAGE_NAME="app_$DATE.tar.gz"
           
           # Create tar archive directly from current directory
-          tar -czf "$PACKAGE_NAME" \
+          # Create tar archive in temporary directory to avoid "file changed as we read it"
+          tar -czf "/tmp/$PACKAGE_NAME" \
             --exclude='.git' \
             --exclude='.github' \
             --exclude='.gitignore' \
@@ -44,6 +45,9 @@ jobs:
             --exclude='Thumbs.db' \
             --exclude='*.tar.gz' \
             .
+          
+          # Move package back to workspace
+          mv "/tmp/$PACKAGE_NAME" .
           
           # Verify the archive structure
           echo "Archive contents (first 20 files):"
@@ -354,3 +358,18 @@ jobs:
           else
             echo "✅ All deployments successful!"
           fi
+
+      - name: Trigger Instance Refresh
+        if: success()
+        run: |
+          echo "🔄 Triggering Auto Scaling Group instance refresh..."
+          
+          REFRESH_ID=$(aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name $ASG_NAME \
+            --preferences '{"MinHealthyPercentage": 90, "InstanceWarmup": 300}' \
+            --query 'InstanceRefreshId' \
+            --output text)
+          
+          echo " Instance refresh started with ID: $REFRESH_ID "
+          echo "This will gradually replace instances with the updated launch template."
+          echo "Monitor progress in AWS Console or use: aws autoscaling describe-instance-refreshes --auto-scaling-group-name $ASG_NAME"
