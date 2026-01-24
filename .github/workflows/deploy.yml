@@ -163,10 +163,16 @@ jobs:
           
           echo "[$TIMESTAMP] WordPress files verified at: $SOURCE_DIR"
           
+          # Check for broken config from previous failed deployment
+          if grep -q "'\$DB_NAME'" /var/www/html/wp-config.php 2>/dev/null; then
+            echo "[$TIMESTAMP] Found broken configuration file, removing..."
+            sudo rm /var/www/html/wp-config.php
+          fi
+          
           # Configure wp-config.php if it doesn't exist
           if [ ! -f "/var/www/html/wp-config.php" ]; then
             echo "[$TIMESTAMP] Creating wp-config.php..."
-            cat > /tmp/wp-config.php << 'WPCONFIG'
+            cat > /tmp/wp-config.php << WPCONFIG
           <?php
           define('DB_NAME', '$DB_NAME');
           define('DB_USER', '$DB_USER');
@@ -184,7 +190,7 @@ jobs:
           define('LOGGED_IN_SALT',   'put your unique phrase here');
           define('NONCE_SALT',       'put your unique phrase here');
           
-          $table_prefix = 'wp_';
+          \$table_prefix = 'wp_';
           define('WP_DEBUG', false);
           
           if (!defined('ABSPATH')) {
