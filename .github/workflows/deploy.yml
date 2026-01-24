@@ -364,6 +364,6 @@ jobs:
             --query 'InstanceRefreshId' \
             --output text)
           
-          echo "Instance refresh started with ID: $REFRESH_ID"
+          echo " Instance refresh started with ID: $REFRESH_ID "
           echo "This will gradually replace instances with the updated launch template."
           echo "Monitor progress in AWS Console or use: aws autoscaling describe-instance-refreshes --auto-scaling-group-name $ASG_NAME"
