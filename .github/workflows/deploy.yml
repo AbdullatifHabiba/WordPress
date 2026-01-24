@@ -113,156 +113,168 @@ jobs:
           SUCCESS_COUNT=0
           TOTAL_INSTANCES=$(echo $INSTANCE_IDS | wc -w)
           
+          # Create deployment script
+          cat > /tmp/deploy-script.sh << 'DEPLOY_SCRIPT'
+          #!/bin/bash
+          set -e
+          
+          TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
+          echo "[$TIMESTAMP] Starting deployment of $PACKAGE_NAME on $(hostname)"
+          
+          # Check AWS CLI and credentials
+          echo "[$TIMESTAMP] Checking AWS configuration..."
+          aws --version || echo "AWS CLI not found"
+          aws sts get-caller-identity || echo "AWS credentials not configured"
+          
+          # List S3 bucket contents to test access
+          echo "[$TIMESTAMP] Testing S3 access..."
+          aws s3 ls s3://$S3_BUCKET/builds/ | head -5 || echo "Cannot access S3 bucket"
+          
+          # Create backup
+          BACKUP_DIR="/tmp/wp_backup_$(date +%s)"
+          echo "[$TIMESTAMP] Creating backup at $BACKUP_DIR"
+          sudo cp -r /var/www/html "$BACKUP_DIR" || echo "Warning: Backup failed"
+          
+          # Download package from S3
+          echo "[$TIMESTAMP] Downloading package from S3..."
+          echo "[$TIMESTAMP] Attempting to download: s3://$S3_BUCKET/builds/$PACKAGE_NAME"
+          
+          if ! aws s3 cp "s3://$S3_BUCKET/builds/$PACKAGE_NAME" /tmp/; then
+            echo "[$TIMESTAMP] ERROR: Failed to download package from S3"
+            echo "[$TIMESTAMP] Checking if file exists in S3..."
+            aws s3api head-object --bucket $S3_BUCKET --key "builds/$PACKAGE_NAME" || echo "File does not exist in S3"
+            echo "[$TIMESTAMP] Current IAM identity:"
+            aws sts get-caller-identity || echo "Cannot get IAM identity"
+            echo "[$TIMESTAMP] Available files in S3 bucket:"
+            aws s3 ls s3://$S3_BUCKET/builds/ | tail -10 || echo "Cannot list S3 bucket"
+            exit 1
+          fi
+          
+          echo "[$TIMESTAMP] Package downloaded successfully: $(ls -lh /tmp/$PACKAGE_NAME)"
+          
+          # Extract package
+          EXTRACT_DIR="/tmp/app_extract_$(date +%s)"
+          mkdir -p "$EXTRACT_DIR"
+          echo "[$TIMESTAMP] Extracting package..."
+          tar -xzf "/tmp/$PACKAGE_NAME" -C "$EXTRACT_DIR" || { echo "[$TIMESTAMP] ERROR: Failed to extract package"; exit 1; }
+          
+          # Verify WordPress files
+          if [ ! -f "$EXTRACT_DIR/index.php" ]; then
+            echo "[$TIMESTAMP] ERROR: WordPress files not found in package"
+            echo "[$TIMESTAMP] Contents of extracted directory:"
+            ls -la "$EXTRACT_DIR" | head -10
+            exit 1
+          fi
+          
+          echo "[$TIMESTAMP] WordPress files verified successfully"
+          
+          # Configure database settings if wp-config.php doesn't exist
+          if [ ! -f "/var/www/html/wp-config.php" ]; then
+            echo "[$TIMESTAMP] Creating wp-config.php with database settings..."
+            cat > /tmp/wp-config.php << 'WPCONFIG'
+          <?php
+          define('DB_NAME', getenv('DB_NAME'));
+          define('DB_USER', getenv('DB_USER'));
+          define('DB_PASSWORD', getenv('DB_PASSWORD'));
+          define('DB_HOST', getenv('DB_HOST'));
+          define('DB_CHARSET', 'utf8');
+          define('DB_COLLATE', '');
+          
+          $table_prefix = 'wp_';
+          define('WP_DEBUG', false);
+          
+          define('AUTH_KEY', 'put your unique phrase here');
+          define('SECURE_AUTH_KEY', 'put your unique phrase here');
+          define('LOGGED_IN_KEY', 'put your unique phrase here');
+          define('NONCE_KEY', 'put your unique phrase here');
+          define('AUTH_SALT', 'put your unique phrase here');
+          define('SECURE_AUTH_SALT', 'put your unique phrase here');
+          define('LOGGED_IN_SALT', 'put your unique phrase here');
+          define('NONCE_SALT', 'put your unique phrase here');
+          
+          if (!defined('ABSPATH')) {
+              define('ABSPATH', __DIR__ . '/');
+          }
+          
+          require_once ABSPATH . 'wp-settings.php';
+          WPCONFIG
+            
+            # Set environment variables for wp-config.php
+            export DB_NAME="$DB_NAME"
+            export DB_USER="$DB_USER"
+            export DB_PASSWORD="$DB_PASSWORD"
+            export DB_HOST="$DB_HOST"
+            
+            sudo mv /tmp/wp-config.php /var/www/html/wp-config.php
+            echo "[$TIMESTAMP] wp-config.php created successfully"
+          else
+            echo "[$TIMESTAMP] wp-config.php already exists, skipping creation"
+          fi
+          
+          # Stop Apache
+          echo "[$TIMESTAMP] Stopping Apache..."
+          sudo systemctl stop apache2 || { echo "[$TIMESTAMP] WARNING: Failed to stop Apache"; }
+          
+          # Sync files
+          echo "[$TIMESTAMP] Syncing files..."
+          sudo rsync -av --delete --exclude="wp-config.php" --exclude="wp-content/uploads/" --exclude=".git/" --exclude=".gitignore" "$EXTRACT_DIR/" /var/www/html/ || { echo "[$TIMESTAMP] ERROR: Failed to sync files"; exit 1; }
+          
+          # Fix permissions
+          echo "[$TIMESTAMP] Setting permissions..."
+          sudo chown -R www-data:www-data /var/www/html/
+          sudo find /var/www/html/ -type d -exec chmod 755 {} \;
+          sudo find /var/www/html/ -type f -exec chmod 644 {} \;
+          
+          # Secure wp-config
+          if [ -f "/var/www/html/wp-config.php" ]; then
+            sudo chmod 600 /var/www/html/wp-config.php
+            sudo chown www-data:www-data /var/www/html/wp-config.php
+          fi
+          
+          # Fix uploads permissions
+          if [ -d "/var/www/html/wp-content/uploads" ]; then
+            sudo chown -R www-data:www-data /var/www/html/wp-content/uploads/
+            sudo chmod -R 755 /var/www/html/wp-content/uploads/
+          fi
+          
+          # Start Apache
+          echo "[$TIMESTAMP] Starting Apache..."
+          sudo systemctl start apache2 || { echo "[$TIMESTAMP] ERROR: Failed to start Apache"; exit 1; }
+          
+          # Verify Apache is running
+          if ! sudo systemctl is-active --quiet apache2; then
+            echo "[$TIMESTAMP] ERROR: Apache is not running after start"
+            sudo systemctl status apache2
+            exit 1
+          fi
+          
+          # Cleanup
+          rm -rf "/tmp/$PACKAGE_NAME" "$EXTRACT_DIR"
+          sudo rm -rf "$BACKUP_DIR" 2>/dev/null || true
+          
+          echo "[$TIMESTAMP] ✅ Deployment completed successfully on $(hostname)"
+          
+          # Health check
+          sleep 3
+          if curl -s -f "http://localhost/" >/dev/null 2>&1; then
+            echo "[$TIMESTAMP] ✅ Health check passed"
+          else
+            echo "[$TIMESTAMP] ⚠️ Health check failed, but deployment completed"
+            curl -s -I "http://localhost/" || echo "Cannot connect to localhost"
+          fi
+          DEPLOY_SCRIPT
+          
           for INSTANCE_ID in $INSTANCE_IDS; do
             echo "🚀 Deploying to instance: $INSTANCE_ID"
             
-            # Embed the deployment script directly in SSM command
+            # Read the script file
+            SCRIPT_CONTENT=$(cat /tmp/deploy-script.sh)
+            
+            # Send command via SSM with environment variables
             COMMAND_ID=$(aws ssm send-command \
               --instance-ids "$INSTANCE_ID" \
               --document-name "AWS-RunShellScript" \
-              --parameters 'commands=[
-                "echo Starting deployment process...",
-                "PACKAGE_NAME=\"'"$PACKAGE_NAME"'\"",
-                "TIMESTAMP=$(date \"+%Y-%m-%d %H:%M:%S\")",
-                "DB_NAME=\"'\"$DB_NAME\"'\"",
-                "DB_USER=\"'\"$DB_USER\"'\"",
-                "DB_PASSWORD=\"'\"$DB_PASSWORD\"'\"",
-                "DB_HOST=\"'\"$DB_HOST\"'\"",
-                "S3_BUCKET=\"'\"$S3_BUCKET\"'\"",
-                "echo \"[$TIMESTAMP] Starting deployment of $PACKAGE_NAME on $(hostname)\"",
-                "",
-                "# Check AWS CLI and credentials",
-                "echo \"[$TIMESTAMP] Checking AWS configuration...\"",
-                "aws --version || echo \"AWS CLI not found\"",
-                "aws sts get-caller-identity || echo \"AWS credentials not configured\"",
-                "",
-                "# List S3 bucket contents to test access",
-                "echo \"[$TIMESTAMP] Testing S3 access...\"",
-                "aws s3 ls s3://$S3_BUCKET/builds/ | head -5 || echo \"Cannot access S3 bucket\"",
-                "",
-                "# Create backup",
-                "BACKUP_DIR=\"/tmp/wp_backup_$(date +%s)\"",
-                "echo \"[$TIMESTAMP] Creating backup at $BACKUP_DIR\"",
-                "sudo cp -r /var/www/html \"$BACKUP_DIR\" || echo \"Warning: Backup failed\"",
-                "",
-                "# Download package from S3 with verbose output",
-                "echo \"[$TIMESTAMP] Downloading package from S3...\"",
-                "echo \"[$TIMESTAMP] Attempting to download: s3://$S3_BUCKET/builds/$PACKAGE_NAME\"",
-                "aws s3 cp \"s3://$S3_BUCKET/builds/$PACKAGE_NAME\" /tmp/ --debug 2>&1 | tail -10 || DOWNLOAD_FAILED=1",
-                "",
-                "if [ \"$DOWNLOAD_FAILED\" = \"1\" ] || [ ! -f \"/tmp/$PACKAGE_NAME\" ]; then",
-                "  echo \"[$TIMESTAMP] ERROR: Failed to download package from S3\"",
-                "  echo \"[$TIMESTAMP] Checking if file exists in S3...\"",
-                "  aws s3api head-object --bucket $S3_BUCKET --key \"builds/$PACKAGE_NAME\" || echo \"File does not exist in S3\"",
-                "  echo \"[$TIMESTAMP] Current IAM identity:\"",
-                "  aws sts get-caller-identity || echo \"Cannot get IAM identity\"",
-                "  echo \"[$TIMESTAMP] Available files in S3 bucket:\"",
-                "  aws s3 ls s3://$S3_BUCKET/builds/ | tail -10 || echo \"Cannot list S3 bucket\"",
-                "  exit 1",
-                "fi",
-                "",
-                "echo \"[$TIMESTAMP] Package downloaded successfully: $(ls -lh /tmp/$PACKAGE_NAME)\"",
-                "",
-                "# Extract package",
-                "EXTRACT_DIR=\"/tmp/app_extract_$(date +%s)\"",
-                "mkdir -p \"$EXTRACT_DIR\"",
-                "echo \"[$TIMESTAMP] Extracting package...\"",
-                "tar -xzf \"/tmp/$PACKAGE_NAME\" -C \"$EXTRACT_DIR\" || { echo \"[$TIMESTAMP] ERROR: Failed to extract package\"; exit 1; }",
-                "",
-                "# Verify WordPress files",
-                "if [ ! -f \"$EXTRACT_DIR/index.php\" ]; then",
-                "  echo \"[$TIMESTAMP] ERROR: WordPress files not found in package\"",
-                "  echo \"[$TIMESTAMP] Contents of extracted directory:\"",
-                "  ls -la \"$EXTRACT_DIR\" | head -10",
-                "  exit 1",
-                "fi",
-                "",
-                "echo \"[$TIMESTAMP] WordPress files verified successfully\"",
-                "",
-                "# Configure database settings if wp-config.php doesn't exist",
-                "if [ ! -f \"/var/www/html/wp-config.php\" ]; then",
-                "  echo \"[$TIMESTAMP] Creating wp-config.php with database settings...\"",
-                "  echo \"<?php\" > /tmp/wp-config.php",
-                "  echo \"define('DB_NAME', '$DB_NAME');\" >> /tmp/wp-config.php",
-                "  echo \"define('DB_USER', '$DB_USER');\" >> /tmp/wp-config.php",
-                "  echo \"define('DB_PASSWORD', '$DB_PASSWORD');\" >> /tmp/wp-config.php",
-                "  echo \"define('DB_HOST', '$DB_HOST');\" >> /tmp/wp-config.php",
-                "  echo \"define('DB_CHARSET', 'utf8');\" >> /tmp/wp-config.php",
-                "  echo \"define('DB_COLLATE', '');\" >> /tmp/wp-config.php",
-                "  echo \"\" >> /tmp/wp-config.php",
-                "  echo \"\\$table_prefix = 'wp_';\" >> /tmp/wp-config.php",
-                "  echo \"define('WP_DEBUG', false);\" >> /tmp/wp-config.php",
-                "  echo \"\" >> /tmp/wp-config.php",
-                "  echo \"define('AUTH_KEY', 'put your unique phrase here');\" >> /tmp/wp-config.php",
-                "  echo \"define('SECURE_AUTH_KEY', 'put your unique phrase here');\" >> /tmp/wp-config.php",
-                "  echo \"define('LOGGED_IN_KEY', 'put your unique phrase here');\" >> /tmp/wp-config.php",
-                "  echo \"define('NONCE_KEY', 'put your unique phrase here');\" >> /tmp/wp-config.php",
-                "  echo \"define('AUTH_SALT', 'put your unique phrase here');\" >> /tmp/wp-config.php",
-                "  echo \"define('SECURE_AUTH_SALT', 'put your unique phrase here');\" >> /tmp/wp-config.php",
-                "  echo \"define('LOGGED_IN_SALT', 'put your unique phrase here');\" >> /tmp/wp-config.php",
-                "  echo \"define('NONCE_SALT', 'put your unique phrase here');\" >> /tmp/wp-config.php",
-                "  echo \"\" >> /tmp/wp-config.php",
-                "  echo \"defined('ABSPATH') || define('ABSPATH', __DIR__ . '/');\" >> /tmp/wp-config.php",
-                "  echo \"\" >> /tmp/wp-config.php",
-                "  echo \"require_once ABSPATH . 'wp-settings.php';\" >> /tmp/wp-config.php",
-                "  sudo mv /tmp/wp-config.php /var/www/html/wp-config.php",
-                "  echo \"[$TIMESTAMP] wp-config.php created successfully\"",
-                "else",
-                "  echo \"[$TIMESTAMP] wp-config.php already exists, skipping creation\"",
-                "fi",
-                "",
-                "# Stop Apache",
-                "echo \"[$TIMESTAMP] Stopping Apache...\"",
-                "sudo systemctl stop apache2 || { echo \"[$TIMESTAMP] WARNING: Failed to stop Apache\"; }",
-                "",
-                "# Sync files",
-                "echo \"[$TIMESTAMP] Syncing files...\"",
-                "sudo rsync -av --delete --exclude=\"wp-config.php\" --exclude=\"wp-content/uploads/\" --exclude=\".git/\" --exclude=\".gitignore\" \"$EXTRACT_DIR/\" /var/www/html/ || { echo \"[$TIMESTAMP] ERROR: Failed to sync files\"; exit 1; }",
-                "",
-                "# Fix permissions",
-                "echo \"[$TIMESTAMP] Setting permissions...\"",
-                "sudo chown -R www-data:www-data /var/www/html/",
-                "sudo find /var/www/html/ -type d -exec chmod 755 {} \\;",
-                "sudo find /var/www/html/ -type f -exec chmod 644 {} \\;",
-                "",
-                "# Secure wp-config",
-                "if [ -f \"/var/www/html/wp-config.php\" ]; then",
-                "  sudo chmod 600 /var/www/html/wp-config.php",
-                "  sudo chown www-data:www-data /var/www/html/wp-config.php",
-                "fi",
-                "",
-                "# Fix uploads permissions",
-                "if [ -d \"/var/www/html/wp-content/uploads\" ]; then",
-                "  sudo chown -R www-data:www-data /var/www/html/wp-content/uploads/",
-                "  sudo chmod -R 755 /var/www/html/wp-content/uploads/",
-                "fi",
-                "",
-                "# Start Apache",
-                "echo \"[$TIMESTAMP] Starting Apache...\"",
-                "sudo systemctl start apache2 || { echo \"[$TIMESTAMP] ERROR: Failed to start Apache\"; exit 1; }",
-                "",
-                "# Verify Apache is running",
-                "if ! sudo systemctl is-active --quiet apache2; then",
-                "  echo \"[$TIMESTAMP] ERROR: Apache is not running after start\"",
-                "  sudo systemctl status apache2",
-                "  exit 1",
-                "fi",
-                "",
-                "# Cleanup",
-                "rm -rf \"/tmp/$PACKAGE_NAME\" \"$EXTRACT_DIR\"",
-                "sudo rm -rf \"$BACKUP_DIR\" 2>/dev/null || true",
-                "",
-                "echo \"[$TIMESTAMP] ✅ Deployment completed and successfully on $(hostname)\"",
-                "",
-                "# Health check",
-                "sleep 3",
-                "if curl -s -f \"http://localhost/\" >/dev/null 2>&1; then",
-                "  echo \"[$TIMESTAMP] ✅ Health check passed\"",
-                "else",
-                "  echo \"[$TIMESTAMP] ⚠️ Health check failed, but deployment completed\"",
-                "  curl -s -I \"http://localhost/\" || echo \"Cannot connect to localhost\"",
-                "fi"
-              ]' \
+              --parameters "{\"commands\":[\"export DB_NAME='$DB_NAME'\",\"export DB_USER='$DB_USER'\",\"export DB_PASSWORD='$DB_PASSWORD'\",\"export DB_HOST='$DB_HOST'\",\"export S3_BUCKET='$S3_BUCKET'\",\"export PACKAGE_NAME='$PACKAGE_NAME'\",\"$SCRIPT_CONTENT\"]}" \
               --timeout-seconds 900 \
               --output text \
               --query 'Command.CommandId')
@@ -295,14 +307,14 @@ jobs:
                 --command-id "$COMMAND_ID" \
                 --instance-id "$INSTANCE_ID" \
                 --query 'StandardErrorContent' \
-                --output text | head -10
+                --output text | head -20
               
               echo "   📋 Standard Output:"
               aws ssm get-command-invocation \
                 --command-id "$COMMAND_ID" \
                 --instance-id "$INSTANCE_ID" \
                 --query 'StandardOutputContent' \
-                --output text | tail -10
+                --output text | tail -20
             fi
           done
           
@@ -336,4 +348,3 @@ jobs:
           echo "Instance refresh started with ID: $REFRESH_ID"
           echo "This will gradually replace instances with the updated launch template."
           echo "Monitor progress in AWS Console or use: aws autoscaling describe-instance-refreshes --auto-scaling-group-name $ASG_NAME"
-   
