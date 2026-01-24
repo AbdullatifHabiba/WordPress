@@ -31,31 +31,23 @@ jobs:
           DATE=$(date +%Y%m%d_%H%M%S)
           PACKAGE_NAME="app_$DATE.tar.gz"
           
-          # Create a clean directory structure
-          TEMP_DIR="wordpress_build_$DATE"
-          mkdir -p "$TEMP_DIR"
-          
-          # Copy files to temp directory with exclusions
-          rsync -av \
-            --exclude='.git/' \
-            --exclude='.github/' \
+          # Create tar archive directly from current directory
+          tar -czf "$PACKAGE_NAME" \
+            --exclude='.git' \
+            --exclude='.github' \
             --exclude='.gitignore' \
             --exclude='wp-config.php' \
-            --exclude='wp-content/uploads/' \
-            --exclude='node_modules/' \
+            --exclude='wp-content/uploads/*' \
+            --exclude='node_modules' \
             --exclude='*.log' \
             --exclude='.DS_Store' \
             --exclude='Thumbs.db' \
-            ./ "$TEMP_DIR/"
+            --exclude='*.tar.gz' \
+            .
           
-          # Create tar archive from the clean directory
-          tar -czf "$PACKAGE_NAME" -C "$TEMP_DIR" .
-          
-          # Verify the archive
-          tar -tzf "$PACKAGE_NAME" | head -10
-          
-          # Cleanup temp directory
-          rm -rf "$TEMP_DIR"
+          # Verify the archive structure
+          echo "Archive contents (first 20 files):"
+          tar -tzf "$PACKAGE_NAME" | head -20
           
           echo "PACKAGE_NAME=$PACKAGE_NAME" >> $GITHUB_ENV
           
@@ -117,15 +109,6 @@ jobs:
           TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
           echo "[$TIMESTAMP] Starting deployment of $PACKAGE_NAME on $(hostname)"
           
-          # Check AWS CLI and credentials
-          echo "[$TIMESTAMP] Checking AWS configuration..."
-          aws --version || echo "AWS CLI not found"
-          aws sts get-caller-identity || echo "AWS credentials not configured"
-          
-          # List S3 bucket contents to test access
-          echo "[$TIMESTAMP] Testing S3 access..."
-          aws s3 ls s3://$S3_BUCKET/builds/ | head -5 || echo "Cannot access S3 bucket"
-          
           # Create backup
           BACKUP_DIR="/tmp/wp_backup_$(date +%s)"
           echo "[$TIMESTAMP] Creating backup at $BACKUP_DIR"
@@ -133,41 +116,53 @@ jobs:
           
           # Download package from S3
           echo "[$TIMESTAMP] Downloading package from S3..."
-          echo "[$TIMESTAMP] Attempting to download: s3://$S3_BUCKET/builds/$PACKAGE_NAME"
           
           if ! aws s3 cp "s3://$S3_BUCKET/builds/$PACKAGE_NAME" /tmp/; then
             echo "[$TIMESTAMP] ERROR: Failed to download package from S3"
-            echo "[$TIMESTAMP] Checking if file exists in S3..."
-            aws s3api head-object --bucket $S3_BUCKET --key "builds/$PACKAGE_NAME" || echo "File does not exist in S3"
-            echo "[$TIMESTAMP] Current IAM identity:"
-            aws sts get-caller-identity || echo "Cannot get IAM identity"
-            echo "[$TIMESTAMP] Available files in S3 bucket:"
-            aws s3 ls s3://$S3_BUCKET/builds/ | tail -10 || echo "Cannot list S3 bucket"
             exit 1
           fi
           
-          echo "[$TIMESTAMP] Package downloaded successfully: $(ls -lh /tmp/$PACKAGE_NAME)"
+          echo "[$TIMESTAMP] Package downloaded: $(ls -lh /tmp/$PACKAGE_NAME)"
           
           # Extract package
           EXTRACT_DIR="/tmp/app_extract_$(date +%s)"
           mkdir -p "$EXTRACT_DIR"
           echo "[$TIMESTAMP] Extracting package..."
-          tar -xzf "/tmp/$PACKAGE_NAME" -C "$EXTRACT_DIR" || { echo "[$TIMESTAMP] ERROR: Failed to extract package"; exit 1; }
+          tar -xzf "/tmp/$PACKAGE_NAME" -C "$EXTRACT_DIR" || { echo "[$TIMESTAMP] ERROR: Failed to extract"; exit 1; }
           
-          # Verify WordPress files
-          if [ ! -f "$EXTRACT_DIR/index.php" ]; then
-            echo "[$TIMESTAMP] ERROR: WordPress files not found in package"
-            echo "[$TIMESTAMP] Contents of extracted directory:"
-            ls -la "$EXTRACT_DIR" | head -10
+          # Check extracted structure
+          echo "[$TIMESTAMP] Checking extracted files..."
+          ls -la "$EXTRACT_DIR/" | head -10
+          
+          # Determine source directory (handle nested structure if present)
+          if [ -f "$EXTRACT_DIR/index.php" ] && [ -f "$EXTRACT_DIR/wp-login.php" ]; then
+            # Files are at root level (correct structure)
+            SOURCE_DIR="$EXTRACT_DIR"
+            echo "[$TIMESTAMP] Files extracted correctly at root level"
+          elif [ -d "$EXTRACT_DIR/wordpress_build_"* ]; then
+            # Files are nested (old package format)
+            NESTED_DIR=$(find "$EXTRACT_DIR" -maxdepth 1 -type d -name "wordpress_build_*" | head -1)
+            SOURCE_DIR="$NESTED_DIR"
+            echo "[$TIMESTAMP] Files in nested directory: $SOURCE_DIR"
+          else
+            echo "[$TIMESTAMP] ERROR: Cannot find WordPress files"
+            echo "[$TIMESTAMP] Directory contents:"
+            ls -la "$EXTRACT_DIR/"
             exit 1
           fi
           
-          echo "[$TIMESTAMP] WordPress files verified successfully"
+          # Verify WordPress files exist
+          if [ ! -f "$SOURCE_DIR/wp-login.php" ]; then
+            echo "[$TIMESTAMP] ERROR: WordPress core files not found"
+            exit 1
+          fi
           
-          # Configure database settings if wp-config.php doesn't exist
+          echo "[$TIMESTAMP] WordPress files verified at: $SOURCE_DIR"
+          
+          # Configure wp-config.php if it doesn't exist
           if [ ! -f "/var/www/html/wp-config.php" ]; then
-            echo "[$TIMESTAMP] Creating wp-config.php with database settings..."
-            cat > /tmp/wp-config.php << WPCONFIG
+            echo "[$TIMESTAMP] Creating wp-config.php..."
+            cat > /tmp/wp-config.php << 'WPCONFIG'
           <?php
           define('DB_NAME', '$DB_NAME');
           define('DB_USER', '$DB_USER');
@@ -176,17 +171,17 @@ jobs:
           define('DB_CHARSET', 'utf8');
           define('DB_COLLATE', '');
           
-          \$table_prefix = 'wp_';
-          define('WP_DEBUG', false);
-          
-          define('AUTH_KEY', 'put your unique phrase here');
-          define('SECURE_AUTH_KEY', 'put your unique phrase here');
-          define('LOGGED_IN_KEY', 'put your unique phrase here');
-          define('NONCE_KEY', 'put your unique phrase here');
-          define('AUTH_SALT', 'put your unique phrase here');
+          define('AUTH_KEY',         'put your unique phrase here');
+          define('SECURE_AUTH_KEY',  'put your unique phrase here');
+          define('LOGGED_IN_KEY',    'put your unique phrase here');
+          define('NONCE_KEY',        'put your unique phrase here');
+          define('AUTH_SALT',        'put your unique phrase here');
           define('SECURE_AUTH_SALT', 'put your unique phrase here');
-          define('LOGGED_IN_SALT', 'put your unique phrase here');
-          define('NONCE_SALT', 'put your unique phrase here');
+          define('LOGGED_IN_SALT',   'put your unique phrase here');
+          define('NONCE_SALT',       'put your unique phrase here');
+          
+          $table_prefix = 'wp_';
+          define('WP_DEBUG', false);
           
           if (!defined('ABSPATH')) {
               define('ABSPATH', __DIR__ . '/');
@@ -196,18 +191,28 @@ jobs:
           WPCONFIG
             
             sudo mv /tmp/wp-config.php /var/www/html/wp-config.php
-            echo "[$TIMESTAMP] wp-config.php created successfully"
-          else
-            echo "[$TIMESTAMP] wp-config.php already exists, skipping creation"
           fi
           
           # Stop Apache
           echo "[$TIMESTAMP] Stopping Apache..."
-          sudo systemctl stop apache2 || { echo "[$TIMESTAMP] WARNING: Failed to stop Apache"; }
+          sudo systemctl stop apache2 || true
           
           # Sync files
-          echo "[$TIMESTAMP] Syncing files..."
-          sudo rsync -av --delete --exclude="wp-config.php" --exclude="wp-content/uploads/" --exclude=".git/" --exclude=".gitignore" "$EXTRACT_DIR/" /var/www/html/ || { echo "[$TIMESTAMP] ERROR: Failed to sync files"; exit 1; }
+          echo "[$TIMESTAMP] Syncing files from $SOURCE_DIR to /var/www/html..."
+          sudo rsync -av --delete \
+            --exclude="wp-config.php" \
+            --exclude="wp-content/uploads/" \
+            --exclude=".git/" \
+            --exclude=".gitignore" \
+            "$SOURCE_DIR/" /var/www/html/ || { echo "[$TIMESTAMP] ERROR: Failed to sync"; exit 1; }
+          
+          # Verify deployment
+          echo "[$TIMESTAMP] Verifying WordPress files..."
+          if [ ! -f "/var/www/html/wp-login.php" ]; then
+            echo "[$TIMESTAMP] ERROR: WordPress files not deployed correctly"
+            ls -la /var/www/html/ | head -10
+            exit 1
+          fi
           
           # Fix permissions
           echo "[$TIMESTAMP] Setting permissions..."
@@ -221,7 +226,7 @@ jobs:
             sudo chown www-data:www-data /var/www/html/wp-config.php
           fi
           
-          # Fix uploads permissions
+          # Fix uploads permissions (EFS mount)
           if [ -d "/var/www/html/wp-content/uploads" ]; then
             sudo chown -R www-data:www-data /var/www/html/wp-content/uploads/
             sudo chmod -R 755 /var/www/html/wp-content/uploads/
@@ -233,7 +238,7 @@ jobs:
           
           # Verify Apache is running
           if ! sudo systemctl is-active --quiet apache2; then
-            echo "[$TIMESTAMP] ERROR: Apache is not running after start"
+            echo "[$TIMESTAMP] ERROR: Apache is not running"
             sudo systemctl status apache2
             exit 1
           fi
@@ -249,9 +254,12 @@ jobs:
           if curl -s -f "http://localhost/" >/dev/null 2>&1; then
             echo "[$TIMESTAMP] ✅ Health check passed"
           else
-            echo "[$TIMESTAMP] ⚠️ Health check failed, but deployment completed"
-            curl -s -I "http://localhost/" || echo "Cannot connect to localhost"
+            echo "[$TIMESTAMP] ⚠️ Health check warning"
           fi
+          
+          # Show deployed files
+          echo "[$TIMESTAMP] Deployed WordPress files:"
+          ls -la /var/www/html/ | head -15
           DEPLOY_SCRIPT
           
           # Upload script to S3
@@ -275,7 +283,6 @@ jobs:
           for INSTANCE_ID in $INSTANCE_IDS; do
             echo "🚀 Deploying to instance: $INSTANCE_ID"
             
-            # Send command via SSM - download and execute script from S3
             COMMAND_ID=$(aws ssm send-command \
               --instance-ids "$INSTANCE_ID" \
               --document-name "AWS-RunShellScript" \
@@ -296,15 +303,13 @@ jobs:
               --query 'Command.CommandId')
             
             echo "   Command ID: $COMMAND_ID"
+            echo "   ⏳ Waiting for deployment..."
             
-            # Wait for completion
-            echo "   ⏳ Waiting for deployment to complete..."
             aws ssm wait command-executed \
               --command-id "$COMMAND_ID" \
               --instance-id "$INSTANCE_ID" \
               --cli-read-timeout 660 || true
             
-            # Check status
             COMMAND_STATUS=$(aws ssm get-command-invocation \
               --command-id "$COMMAND_ID" \
               --instance-id "$INSTANCE_ID" \
@@ -312,58 +317,40 @@ jobs:
               --output text)
             
             if [ "$COMMAND_STATUS" = "Success" ]; then
-              echo "   ✅ Deployment successful on $INSTANCE_ID"
+              echo "   ✅ Success on $INSTANCE_ID"
               SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-            else
-              echo "   ❌ Deployment failed on $INSTANCE_ID"
               
-              # Get error details
-              echo "   📋 Error Output:"
+              # Show last 10 lines of output
+              echo "   📋 Output:"
+              aws ssm get-command-invocation \
+                --command-id "$COMMAND_ID" \
+                --instance-id "$INSTANCE_ID" \
+                --query 'StandardOutputContent' \
+                --output text | tail -10
+            else
+              echo "   ❌ Failed on $INSTANCE_ID (Status: $COMMAND_STATUS)"
+              
+              echo "   📋 Error:"
               aws ssm get-command-invocation \
                 --command-id "$COMMAND_ID" \
                 --instance-id "$INSTANCE_ID" \
                 --query 'StandardErrorContent' \
                 --output text | head -20
-              
-              echo "   📋 Standard Output:"
-              aws ssm get-command-invocation \
-                --command-id "$COMMAND_ID" \
-                --instance-id "$INSTANCE_ID" \
-                --query 'StandardOutputContent' \
-                --output text | tail -20
             fi
           done
           
-          # Cleanup script from S3
           aws s3 rm s3://$S3_BUCKET/scripts/$SCRIPT_NAME || true
           
           echo ""
           echo "📊 Deployment Summary:"
-          echo "   Total instances: $TOTAL_INSTANCES"
-          echo "   Successful: $SUCCESS_COUNT"
-          echo "   Failed: $((TOTAL_INSTANCES - SUCCESS_COUNT))"
+          echo "   Total: $TOTAL_INSTANCES | Success: $SUCCESS_COUNT | Failed: $((TOTAL_INSTANCES - SUCCESS_COUNT))"
           
           if [ $SUCCESS_COUNT -eq 0 ]; then
             echo "❌ All deployments failed!"
             exit 1
           elif [ $SUCCESS_COUNT -lt $TOTAL_INSTANCES ]; then
-            echo "⚠️ Partial deployment completed"
+            echo "⚠️ Partial deployment"
             exit 1
           else
-            echo "✅ All deployments completed successfully!"
+            echo "✅ All deployments successful!"
           fi
-        
-      # - name: Trigger Instance Refresh
-      #   if: success()
-      #   run: |
-      #     echo "🔄 Triggering Auto Scaling Group instance refresh..."
-          
-      #     REFRESH_ID=$(aws autoscaling start-instance-refresh \
-      #       --auto-scaling-group-name $ASG_NAME \
-      #       --preferences '{"MinHealthyPercentage": 90, "InstanceWarmup": 300}' \
-      #       --query 'InstanceRefreshId' \
-      #       --output text)
-          
-      #     echo " Instance refresh started with ID: $REFRESH_ID "
-      #     echo "This will gradually replace instances with the updated launch template."
-      #     echo "Monitor progress in AWS Console or use: aws autoscaling describe-instance-refreshes --auto-scaling-group-name $ASG_NAME"
