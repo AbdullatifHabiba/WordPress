@@ -353,17 +353,17 @@ jobs:
             echo "✅ All deployments completed successfully!"
           fi
         
-      - name: Trigger Instance Refresh
-        if: success()
-        run: |
-          echo "🔄 Triggering Auto Scaling Group instance refresh..."
+      # - name: Trigger Instance Refresh
+      #   if: success()
+      #   run: |
+      #     echo "🔄 Triggering Auto Scaling Group instance refresh..."
           
-          REFRESH_ID=$(aws autoscaling start-instance-refresh \
-            --auto-scaling-group-name $ASG_NAME \
-            --preferences '{"MinHealthyPercentage": 90, "InstanceWarmup": 300}' \
-            --query 'InstanceRefreshId' \
-            --output text)
+      #     REFRESH_ID=$(aws autoscaling start-instance-refresh \
+      #       --auto-scaling-group-name $ASG_NAME \
+      #       --preferences '{"MinHealthyPercentage": 90, "InstanceWarmup": 300}' \
+      #       --query 'InstanceRefreshId' \
+      #       --output text)
           
-          echo " Instance refresh started with ID: $REFRESH_ID "
-          echo "This will gradually replace instances with the updated launch template."
-          echo "Monitor progress in AWS Console or use: aws autoscaling describe-instance-refreshes --auto-scaling-group-name $ASG_NAME"
+      #     echo " Instance refresh started with ID: $REFRESH_ID "
+      #     echo "This will gradually replace instances with the updated launch template."
+      #     echo "Monitor progress in AWS Console or use: aws autoscaling describe-instance-refreshes --auto-scaling-group-name $ASG_NAME"
