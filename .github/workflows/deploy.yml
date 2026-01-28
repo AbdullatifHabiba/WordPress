@@ -1,16 +1,22 @@
-name: Deploy WordPress to AWS
+name: Deploy WordPress Docker to AWS with ECR
 
 on:
   push:
     branches: [master, main]
   workflow_dispatch:
 
+# Required for OIDC authentication
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
     
     env:
-      S3_BUCKET: abdullatif-app
+      AWS_REGION: us-east-1
+      ECR_REPOSITORY: abdu-wordpress
       ASG_NAME: abdullatif-asg
     
     steps:
@@ -19,386 +25,316 @@ jobs:
         with:
           fetch-depth: 1
         
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials using OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
-        
-      - name: Create build package
-        env:
-          DB_NAME: ${{ secrets.DB_NAME }}
-          DB_USER: ${{ secrets.DB_USER }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          DB_HOST: ${{ secrets.DB_HOST }}
+          role-session-name: GitHubActions-WordPressDeployment
+      
+      - name: Verify AWS Identity
         run: |
-          # Generate wp-config.php with secrets
-          echo "Generating wp-config.php..."
-          cat > wp-config.php << WPCONFIG
-          <?php
-          define('DB_NAME', '$DB_NAME');
-          define('DB_USER', '$DB_USER');
-          define('DB_PASSWORD', '$DB_PASSWORD');
-          define('DB_HOST', '$DB_HOST');
-          define('DB_CHARSET', 'utf8');
-          define('DB_COLLATE', '');
+          echo "🔐 Verifying AWS credentials..."
+          aws sts get-caller-identity
+          echo "✅ AWS authentication successful"
+      
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          echo "🐳 Building Docker image..."
           
-          define('AUTH_KEY',         '$(openssl rand -base64 32)');
-          define('SECURE_AUTH_KEY',  '$(openssl rand -base64 32)');
-          define('LOGGED_IN_KEY',    '$(openssl rand -base64 32)');
-          define('NONCE_KEY',        '$(openssl rand -base64 32)');
-          define('AUTH_SALT',        '$(openssl rand -base64 32)');
-          define('SECURE_AUTH_SALT', '$(openssl rand -base64 32)');
-          define('LOGGED_IN_SALT',   '$(openssl rand -base64 32)');
-          define('NONCE_SALT',       '$(openssl rand -base64 32)');
+          # Build the Docker image
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           
-          \$table_prefix = 'wp_';
-          define('WP_DEBUG', false);
+          echo "📦 Pushing image to ECR..."
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           
-          if (!defined('ABSPATH')) {
-              define('ABSPATH', __DIR__ . '/');
-          }
+          echo "✅ Image pushed successfully"
+          echo "Image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           
-          require_once ABSPATH . 'wp-settings.php';
-          WPCONFIG
+          # Export for later steps
+          echo "IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_ENV
+          echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_ENV
+      
+      - name: Update SSM Parameters with Image Information
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          echo "🔧 Updating SSM Parameters with new image information..."
+          
 
-          DATE=$(date +%Y%m%d_%H%M%S)
-          PACKAGE_NAME="app_$DATE.tar.gz"
           
-          # Create tar archive directly from current directory
-          # Create tar archive in temporary directory to avoid "file changed as we read it"
-          tar -czf "/tmp/$PACKAGE_NAME" \
-            --exclude='.git' \
-            --exclude='.github' \
-            --exclude='.gitignore' \
-            --exclude='wp-content/uploads/*' \
-            --exclude='node_modules' \
-            --exclude='*.log' \
-            --exclude='.DS_Store' \
-            --exclude='Thumbs.db' \
-            --exclude='*.tar.gz' \
-            .
+          aws ssm put-parameter \
+            --name "/abdu_app/IMAGE_TAG" \
+            --value "$IMAGE_TAG" \
+            --type "String" \
+            --overwrite \
+            --region $AWS_REGION
           
-          # Move package back to workspace
-          mv "/tmp/$PACKAGE_NAME" .
-          
-          # Verify the archive structure
-          echo "Archive contents (first 20 files):"
-          tar -tzf "$PACKAGE_NAME" | head -20
-          
-          echo "PACKAGE_NAME=$PACKAGE_NAME" >> $GITHUB_ENV
-          
-          # Display package info
-          ls -lh "$PACKAGE_NAME"
-        
-      - name: Upload to S3
+          echo "✅ SSM Parameters updated successfully"
+          echo "   ECR_REGISTRY: $ECR_REGISTRY"
+          echo "   ECR_REPOSITORY: $ECR_REPOSITORY"
+          echo "   IMAGE_TAG: $IMAGE_TAG"
+      
+      - name: Verify Docker configurations in repository
         run: |
-          echo "📦 Uploading $PACKAGE_NAME to S3..."
-          aws s3 cp "$PACKAGE_NAME" s3://$S3_BUCKET/builds/ --storage-class STANDARD_IA
-          
-          # Upload as latest for self-healing
-          aws s3 cp "$PACKAGE_NAME" s3://$S3_BUCKET/builds/latest.tar.gz --storage-class STANDARD_IA
-          
-          # Verify upload
-          aws s3 ls s3://$S3_BUCKET/builds/ | grep "$PACKAGE_NAME"
-          
-          echo "S3_PATH=s3://$S3_BUCKET/builds/$PACKAGE_NAME" >> $GITHUB_ENV
-          echo "✅ Package uploaded successfully (including latest.tar.gz)"
-        
-      - name: Get Auto Scaling Group Instances
-        id: get-instances
+          echo "✅ Docker configurations verified"
+          echo "   - docker-compose.yml (available in repository)"
+          echo "   - nginx.conf (available in repository)"
+          echo "   - user-data.sh fetches credentials from SSM on instance startup"
+      
+     
+      - name: Create and upload deployment script
         run: |
-          echo "🔍 Finding instances in Auto Scaling Group..."
+          echo "📝 Creating deployment script using SSM Parameter Store..."
           
-          # Get healthy instances from ASG
-          INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names $ASG_NAME \
-            --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' \
-            --output text)
-          
-          if [ -z "$INSTANCE_IDS" ]; then
-            echo "❌ No healthy instances found in Auto Scaling Group!"
-            exit 1
-          fi
-          
-          echo "INSTANCE_IDS=$INSTANCE_IDS" >> $GITHUB_ENV
-          echo "✅ Found healthy instances: $INSTANCE_IDS"
-          
-          # Get instance details
-          for INSTANCE_ID in $INSTANCE_IDS; do
-            PRIVATE_IP=$(aws ec2 describe-instances \
-              --instance-ids "$INSTANCE_ID" \
-              --query 'Reservations[0].Instances[0].PrivateIpAddress' \
-              --output text)
-            echo "   Instance $INSTANCE_ID: $PRIVATE_IP"
-          done
-        
-      - name: Create deployment script
-        env:
-          DB_NAME: ${{ secrets.DB_NAME }}
-          DB_USER: ${{ secrets.DB_USER }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          DB_HOST: ${{ secrets.DB_HOST }}
-        run: |
-          echo "📝 Creating deployment script..."
-          
-          cat > deploy-script.sh << 'DEPLOY_SCRIPT'
+          cat > deploy-ecr.sh << 'DEPLOY_SCRIPT'
           #!/bin/bash
           set -e
           
           TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
-          echo "[$TIMESTAMP] Starting deployment of $PACKAGE_NAME on $(hostname)"
+          AWS_REGION="us-east-1"
+          echo "=========================================="
+          echo "[$TIMESTAMP] Starting Docker deployment on $(hostname)"
+          echo "=========================================="
           
-          # Create backup
-          BACKUP_DIR="/tmp/wp_backup_$(date +%s)"
-          echo "[$TIMESTAMP] Creating backup at $BACKUP_DIR"
-          sudo cp -r /var/www/html "$BACKUP_DIR" || echo "Warning: Backup failed"
+          cd /opt/wordpress
           
-          # Download package from S3
-          echo "[$TIMESTAMP] Downloading package from S3..."
+          # Fetch ECR configuration from SSM Parameter Store
+          echo "[$TIMESTAMP] Fetching ECR configuration from SSM Parameter Store..."
+          ECR_REGISTRY=$(aws ssm get-parameter --name "/abdu_app/ECR_REGISTRY" --query "Parameter.Value" --output text --region $AWS_REGION)
+          ECR_REPOSITORY=$(aws ssm get-parameter --name "/abdu_app/ECR_REPOSITORY" --query "Parameter.Value" --output text --region $AWS_REGION)
+          IMAGE_TAG=$(aws ssm get-parameter --name "/abdu_app/IMAGE_TAG" --query "Parameter.Value" --output text --region $AWS_REGION)
           
-          if ! aws s3 cp "s3://$S3_BUCKET/builds/$PACKAGE_NAME" /tmp/; then
-            echo "[$TIMESTAMP] ERROR: Failed to download package from S3"
+          if [ -z "$ECR_REGISTRY" ] || [ -z "$ECR_REPOSITORY" ] || [ -z "$IMAGE_TAG" ]; then
+            echo "[$TIMESTAMP] ❌ ERROR: Failed to retrieve complete ECR configuration from SSM"
             exit 1
           fi
           
-          echo "[$TIMESTAMP] Package downloaded: $(ls -lh /tmp/$PACKAGE_NAME)"
+          echo "[$TIMESTAMP] ✅ Retrieved ECR configuration from SSM"
+          echo "[$TIMESTAMP]    Registry: $ECR_REGISTRY"
+          echo "[$TIMESTAMP]    Repository: $ECR_REPOSITORY"
+          echo "[$TIMESTAMP]    Image Tag: $IMAGE_TAG"
           
-          # Extract package
-          EXTRACT_DIR="/tmp/app_extract_$(date +%s)"
-          mkdir -p "$EXTRACT_DIR"
-          echo "[$TIMESTAMP] Extracting package..."
-          tar -xzf "/tmp/$PACKAGE_NAME" -C "$EXTRACT_DIR" || { echo "[$TIMESTAMP] ERROR: Failed to extract"; exit 1; }
+          # Login to ECR
+          echo "[$TIMESTAMP] Logging into Amazon ECR..."
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
           
-          # Check extracted structure
-          echo "[$TIMESTAMP] Checking extracted files..."
-          ls -la "$EXTRACT_DIR/" | head -10
+          # Pull the new image
+          echo "[$TIMESTAMP] Pulling new image from ECR..."
+          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           
-          # Determine source directory (handle nested structure if present)
-          if [ -f "$EXTRACT_DIR/index.php" ] && [ -f "$EXTRACT_DIR/wp-login.php" ]; then
-            # Files are at root level (correct structure)
-            SOURCE_DIR="$EXTRACT_DIR"
-            echo "[$TIMESTAMP] Files extracted correctly at root level"
-          elif [ -d "$EXTRACT_DIR/wordpress_build_"* ]; then
-            # Files are nested (old package format)
-            NESTED_DIR=$(find "$EXTRACT_DIR" -maxdepth 1 -type d -name "wordpress_build_*" | head -1)
-            SOURCE_DIR="$NESTED_DIR"
-            echo "[$TIMESTAMP] Files in nested directory: $SOURCE_DIR"
-          else
-            echo "[$TIMESTAMP] ERROR: Cannot find WordPress files"
-            echo "[$TIMESTAMP] Directory contents:"
-            ls -la "$EXTRACT_DIR/"
-            exit 1
-          fi
+          # Stop and remove old containers
+          echo "[$TIMESTAMP] Stopping existing containers..."
+          docker compose down || true
           
-          # Verify WordPress files exist
-          if [ ! -f "$SOURCE_DIR/wp-login.php" ]; then
-            echo "[$TIMESTAMP] ERROR: WordPress core files not found"
-            exit 1
-          fi
+          # Remove old images (keep last 3)
+          echo "[$TIMESTAMP] Cleaning up old images..."
+          docker images $ECR_REGISTRY/$ECR_REPOSITORY --format "{{.ID}} {{.Tag}}" | \
+            grep -v "$IMAGE_TAG" | \
+            tail -n +4 | awk '{print $1}' | xargs -r docker rmi || true
           
-          echo "[$TIMESTAMP] WordPress files verified at: $SOURCE_DIR"
+          # Start containers with new image
+          echo "[$TIMESTAMP] Starting containers with new image..."
+          docker compose up -d
           
-          # Check for broken config from previous failed deployment
-          if grep -q "'\$DB_NAME'" /var/www/html/wp-config.php 2>/dev/null; then
-            echo "[$TIMESTAMP] Found broken configuration file, removing..."
-            sudo rm /var/www/html/wp-config.php
-          fi
+          # Wait for containers to be healthy
+          echo "[$TIMESTAMP] Waiting for containers to be healthy..."
+          sleep 60
           
-          # Configure wp-config.php if it doesn't exist
-          if [ ! -f "/var/www/html/wp-config.php" ]; then
-            echo "[$TIMESTAMP] Creating wp-config.php..."
-            cat > /tmp/wp-config.php << WPCONFIG
-          <?php
-          define('DB_NAME', '$DB_NAME');
-          define('DB_USER', '$DB_USER');
-          define('DB_PASSWORD', '$DB_PASSWORD');
-          define('DB_HOST', '$DB_HOST');
-          define('DB_CHARSET', 'utf8');
-          define('DB_COLLATE', '');
+          # Check health status
+          MAX_ATTEMPTS=12
+          ATTEMPT=0
           
-          define('AUTH_KEY',         'put your unique phrase here');
-          define('SECURE_AUTH_KEY',  'put your unique phrase here');
-          define('LOGGED_IN_KEY',    'put your unique phrase here');
-          define('NONCE_KEY',        'put your unique phrase here');
-          define('AUTH_SALT',        'put your unique phrase here');
-          define('SECURE_AUTH_SALT', 'put your unique phrase here');
-          define('LOGGED_IN_SALT',   'put your unique phrase here');
-          define('NONCE_SALT',       'put your unique phrase here');
-          
-          \$table_prefix = 'wp_';
-          define('WP_DEBUG', false);
-          
-          if (!defined('ABSPATH')) {
-              define('ABSPATH', __DIR__ . '/');
-          }
-          
-          require_once ABSPATH . 'wp-settings.php';
-          WPCONFIG
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            WP1_HEALTH=$(docker inspect wordpress-app-1 --format='{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
+            WP2_HEALTH=$(docker inspect wordpress-app-2 --format='{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
+            NGINX_HEALTH=$(docker inspect wordpress-lb --format='{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
             
-            sudo mv /tmp/wp-config.php /var/www/html/wp-config.php
-          fi
-          
-          # Stop Apache
-          echo "[$TIMESTAMP] Stopping Apache..."
-          sudo systemctl stop apache2 || true
-          
-          # Sync files
-          echo "[$TIMESTAMP] Syncing files from $SOURCE_DIR to /var/www/html..."
-          sudo rsync -av --delete \
-            --exclude="wp-config.php" \
-            --exclude="wp-content/uploads/" \
-            --exclude=".git/" \
-            --exclude=".gitignore" \
-            "$SOURCE_DIR/" /var/www/html/ || { echo "[$TIMESTAMP] ERROR: Failed to sync"; exit 1; }
+            echo "[$TIMESTAMP] Health status - WP1: $WP1_HEALTH, WP2: $WP2_HEALTH, Nginx: $NGINX_HEALTH"
+            
+            if [ "$WP1_HEALTH" = "healthy" ] && [ "$WP2_HEALTH" = "healthy" ] && [ "$NGINX_HEALTH" = "healthy" ]; then
+              echo "[$TIMESTAMP] ✅ All containers are healthy"
+              break
+            fi
+            
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "[$TIMESTAMP] Waiting for containers to become healthy (attempt $ATTEMPT/$MAX_ATTEMPTS)..."
+            sleep 10
+          done
           
           # Verify deployment
-          echo "[$TIMESTAMP] Verifying WordPress files..."
-          if [ ! -f "/var/www/html/wp-login.php" ]; then
-            echo "[$TIMESTAMP] ERROR: WordPress files not deployed correctly"
-            ls -la /var/www/html/ | head -10
-            exit 1
-          fi
-          
-          # Fix permissions
-          echo "[$TIMESTAMP] Setting permissions..."
-          sudo chown -R www-data:www-data /var/www/html/
-          sudo find /var/www/html/ -type d -exec chmod 755 {} \;
-          sudo find /var/www/html/ -type f -exec chmod 644 {} \;
-          
-          # Secure wp-config
-          if [ -f "/var/www/html/wp-config.php" ]; then
-            sudo chmod 600 /var/www/html/wp-config.php
-            sudo chown www-data:www-data /var/www/html/wp-config.php
-          fi
-          
-          # Fix uploads permissions (EFS mount)
-          if [ -d "/var/www/html/wp-content/uploads" ]; then
-            sudo chown -R www-data:www-data /var/www/html/wp-content/uploads/
-            sudo chmod -R 755 /var/www/html/wp-content/uploads/
-          fi
-          
-          # Start Apache
-          echo "[$TIMESTAMP] Starting Apache..."
-          sudo systemctl start apache2 || { echo "[$TIMESTAMP] ERROR: Failed to start Apache"; exit 1; }
-          
-          # Verify Apache is running
-          if ! sudo systemctl is-active --quiet apache2; then
-            echo "[$TIMESTAMP] ERROR: Apache is not running"
-            sudo systemctl status apache2
-            exit 1
-          fi
-          
-          # Cleanup
-          rm -rf "/tmp/$PACKAGE_NAME" "$EXTRACT_DIR"
-          sudo rm -rf "$BACKUP_DIR" 2>/dev/null || true
-          
-          echo "[$TIMESTAMP] ✅ Deployment completed successfully on $(hostname)"
-          
-          # Health check
-          sleep 3
-          if curl -s -f "http://localhost/" >/dev/null 2>&1; then
+          echo "[$TIMESTAMP] Verifying deployment..."
+          if curl -sf http://localhost/health > /dev/null; then
             echo "[$TIMESTAMP] ✅ Health check passed"
           else
             echo "[$TIMESTAMP] ⚠️ Health check warning"
           fi
           
-          # Show deployed files
-          echo "[$TIMESTAMP] Deployed WordPress files:"
-          ls -la /var/www/html/ | head -15
+          # Show container status
+          echo "[$TIMESTAMP] Container status:"
+          docker compose ps
+          
+          # Show current image tags
+          echo "[$TIMESTAMP] Current images:"
+          docker images $ECR_REGISTRY/$ECR_REPOSITORY
+          
+          echo "=========================================="
+          echo "[$TIMESTAMP] ✅ Deployment completed successfully on $(hostname)"
+          echo "[$TIMESTAMP] Deployed image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "=========================================="
           DEPLOY_SCRIPT
           
-          # Upload script to S3
-          SCRIPT_NAME="deploy-script-$(date +%s).sh"
-          aws s3 cp deploy-script.sh s3://$S3_BUCKET/scripts/$SCRIPT_NAME
-          aws s3 cp deploy-script.sh s3://$S3_BUCKET/scripts/latest-deploy.sh
+          # Upload script to S3 for historical reference (optional)
+          SCRIPT_NAME="deploy-ecr-$(date +%s).sh"
+          aws s3 cp deploy-ecr.sh s3://abdullatif-app/scripts/$SCRIPT_NAME --storage-class STANDARD_IA || true
+          aws s3 cp deploy-ecr.sh s3://abdullatif-app/scripts/latest-deploy-ecr.sh --storage-class STANDARD_IA || true
           echo "SCRIPT_NAME=$SCRIPT_NAME" >> $GITHUB_ENV
-          echo "✅ Deployment script uploaded to S3"
+          echo "✅ Deployment script created (SSM-based)"
+       # - name: Get Auto Scaling Group Instances
+      #   id: get-instances
+      #   run: |
+      #     echo "🔍 Finding instances in Auto Scaling Group..."
+          
+      #     # Get healthy instances from ASG
+      #     INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+      #       --auto-scaling-group-names $ASG_NAME \
+      #       --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' \
+      #       --output text)
+          
+      #     if [ -z "$INSTANCE_IDS" ]; then
+      #       echo "❌ No healthy instances found in Auto Scaling Group!"
+      #       exit 1
+      #     fi
+          
+      #     echo "INSTANCE_IDS=$INSTANCE_IDS" >> $GITHUB_ENV
+      #     echo "✅ Found healthy instances: $INSTANCE_IDS"
+          
+      #     # Get instance details
+      #     for INSTANCE_ID in $INSTANCE_IDS; do
+      #       PRIVATE_IP=$(aws ec2 describe-instances \
+      #         --instance-ids "$INSTANCE_ID" \
+      #         --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+      #         --output text)
+      #       echo "   Instance $INSTANCE_ID: $PRIVATE_IP"
+      #     done
       
-      - name: Deploy to instances
-        env:
-          DB_NAME: ${{ secrets.DB_NAME }}
-          DB_USER: ${{ secrets.DB_USER }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          DB_HOST: ${{ secrets.DB_HOST }}
+      # - name: Deploy to instances
+      #   run: |
+      #     echo "🚀 Starting deployment to Docker instances..."
+          
+      #     SUCCESS_COUNT=0
+      #     TOTAL_INSTANCES=$(echo $INSTANCE_IDS | wc -w)
+          
+      #     for INSTANCE_ID in $INSTANCE_IDS; do
+      #       echo "=========================================="
+      #       echo "🚀 Deploying to instance: $INSTANCE_ID"
+      #       echo "=========================================="
+            
+      #       COMMAND_ID=$(aws ssm send-command \
+      #         --instance-ids "$INSTANCE_ID" \
+      #         --document-name "AWS-RunShellScript" \
+      #         --parameters commands="[
+      #           \"aws s3 cp s3://abdullatif-app/scripts/$SCRIPT_NAME /tmp/deploy-ecr.sh\",
+      #           \"chmod +x /tmp/deploy-ecr.sh\",
+      #           \"/tmp/deploy-ecr.sh\",
+      #           \"rm -f /tmp/deploy-ecr.sh\"
+      #         ]" \
+      #         --timeout-seconds 900 \
+      #         --output text \
+      #         --query 'Command.CommandId')
+            
+      #       echo "   Command ID: $COMMAND_ID"
+      #       echo "   ⏳ Waiting for deployment to complete..."
+            
+      #       # Wait for command to complete
+      #       aws ssm wait command-executed \
+      #         --command-id "$COMMAND_ID" \
+      #         --instance-id "$INSTANCE_ID" \
+      #         --cli-read-timeout 900 || true
+            
+      #       # Get command status
+      #       COMMAND_STATUS=$(aws ssm get-command-invocation \
+      #         --command-id "$COMMAND_ID" \
+      #         --instance-id "$INSTANCE_ID" \
+      #         --query 'Status' \
+      #         --output text)
+            
+      #       if [ "$COMMAND_STATUS" = "Success" ]; then
+      #         echo "   ✅ Deployment successful on $INSTANCE_ID"
+      #         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+              
+      #         # Show last 20 lines of output
+      #         echo "   📋 Deployment output:"
+      #         aws ssm get-command-invocation \
+      #           --command-id "$COMMAND_ID" \
+      #           --instance-id "$INSTANCE_ID" \
+      #           --query 'StandardOutputContent' \
+      #           --output text | tail -20
+      #       else
+      #         echo "   ❌ Deployment failed on $INSTANCE_ID (Status: $COMMAND_STATUS)"
+              
+      #         echo "   📋 Error output:"
+      #         aws ssm get-command-invocation \
+      #           --command-id "$COMMAND_ID" \
+      #           --instance-id "$INSTANCE_ID" \
+      #           --query 'StandardErrorContent' \
+      #           --output text | head -30
+      #       fi
+            
+      #       echo ""
+      #     done
+          
+      #     # Cleanup script from S3
+      #     aws s3 rm s3://abdullatif-app/scripts/$SCRIPT_NAME || true
+          
+      #     echo "=========================================="
+      #     echo "📊 Deployment Summary"
+      #     echo "=========================================="
+      #     echo "   Docker Image: $IMAGE_URI"
+      #     echo "   Total instances: $TOTAL_INSTANCES"
+      #     echo "   Successful: $SUCCESS_COUNT"
+      #     echo "   Failed: $((TOTAL_INSTANCES - SUCCESS_COUNT))"
+      #     echo "=========================================="
+          
+      #     if [ $SUCCESS_COUNT -eq 0 ]; then
+      #       echo "❌ All deployments failed!"
+      #       exit 1
+      #     elif [ $SUCCESS_COUNT -lt $TOTAL_INSTANCES ]; then
+      #       echo "⚠️ Partial deployment - some instances failed"
+      #       exit 1
+      #     else
+      #       echo "✅ All deployments completed successfully!"
+      #     fi
+      
+      - name: Cleanup old ECR images
+        if: success()
         run: |
-          echo "🚀 Starting deployment to instances..."
+          echo "🧹 Cleaning up old ECR images (keeping last 10)..."
           
-          SUCCESS_COUNT=0
-          TOTAL_INSTANCES=$(echo $INSTANCE_IDS | wc -w)
+          # Get image digests sorted by push date, skip the first 10 (most recent)
+          IMAGES_TO_DELETE=$(aws ecr describe-images \
+            --repository-name $ECR_REPOSITORY \
+            --query 'sort_by(imageDetails,& imagePushedAt)[:-10].imageDigest' \
+            --output text)
           
-          for INSTANCE_ID in $INSTANCE_IDS; do
-            echo "🚀 Deploying to instance: $INSTANCE_ID"
-            
-            COMMAND_ID=$(aws ssm send-command \
-              --instance-ids "$INSTANCE_ID" \
-              --document-name "AWS-RunShellScript" \
-              --parameters commands="[
-                \"export DB_NAME='$DB_NAME'\",
-                \"export DB_USER='$DB_USER'\",
-                \"export DB_PASSWORD='$DB_PASSWORD'\",
-                \"export DB_HOST='$DB_HOST'\",
-                \"export S3_BUCKET='$S3_BUCKET'\",
-                \"export PACKAGE_NAME='$PACKAGE_NAME'\",
-                \"aws s3 cp s3://$S3_BUCKET/scripts/$SCRIPT_NAME /tmp/deploy.sh\",
-                \"chmod +x /tmp/deploy.sh\",
-                \"/tmp/deploy.sh\",
-                \"rm -f /tmp/deploy.sh\"
-              ]" \
-              --timeout-seconds 900 \
-              --output text \
-              --query 'Command.CommandId')
-            
-            echo "   Command ID: $COMMAND_ID"
-            echo "   ⏳ Waiting for deployment..."
-            
-            aws ssm wait command-executed \
-              --command-id "$COMMAND_ID" \
-              --instance-id "$INSTANCE_ID" \
-              --cli-read-timeout 660 || true
-            
-            COMMAND_STATUS=$(aws ssm get-command-invocation \
-              --command-id "$COMMAND_ID" \
-              --instance-id "$INSTANCE_ID" \
-              --query 'Status' \
-              --output text)
-            
-            if [ "$COMMAND_STATUS" = "Success" ]; then
-              echo "   ✅ Success on $INSTANCE_ID"
-              SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-              
-              # Show last 10 lines of output
-              echo "   📋 Output:"
-              aws ssm get-command-invocation \
-                --command-id "$COMMAND_ID" \
-                --instance-id "$INSTANCE_ID" \
-                --query 'StandardOutputContent' \
-                --output text | tail -10
-            else
-              echo "   ❌ Failed on $INSTANCE_ID (Status: $COMMAND_STATUS)"
-              
-              echo "   📋 Error:"
-              aws ssm get-command-invocation \
-                --command-id "$COMMAND_ID" \
-                --instance-id "$INSTANCE_ID" \
-                --query 'StandardErrorContent' \
-                --output text | head -20
-            fi
-          done
-          
-          aws s3 rm s3://$S3_BUCKET/scripts/$SCRIPT_NAME || true
-          
-          echo ""
-          echo "📊 Deployment Summary:"
-          echo "   Total: $TOTAL_INSTANCES | Success: $SUCCESS_COUNT | Failed: $((TOTAL_INSTANCES - SUCCESS_COUNT))"
-          
-          if [ $SUCCESS_COUNT -eq 0 ]; then
-            echo "❌ All deployments failed!"
-            exit 1
-          elif [ $SUCCESS_COUNT -lt $TOTAL_INSTANCES ]; then
-            echo "⚠️ Partial deployment"
-            exit 1
+          if [ ! -z "$IMAGES_TO_DELETE" ]; then
+            for digest in $IMAGES_TO_DELETE; do
+              echo "Deleting image: $digest"
+              aws ecr batch-delete-image \
+                --repository-name $ECR_REPOSITORY \
+                --image-ids imageDigest=$digest || true
+            done
+            echo "✅ Old images cleaned up"
           else
-            echo "✅ All deployments successful!"
+            echo "No old images to delete"
           fi
+
+   

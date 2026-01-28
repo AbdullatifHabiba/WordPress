@@ -1,0 +1,13 @@
+.git
+.github
+.gitignore
+.dockerignore
+*.log
+*.tar.gz
+node_modules
+.DS_Store
+Thumbs.db
+wp-config.php
+wp-content/uploads/*
+README.md
+LICENSE
