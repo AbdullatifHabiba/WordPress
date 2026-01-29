@@ -91,113 +91,113 @@ jobs:
           echo "   - user-data.sh fetches credentials from SSM on instance startup"
       
      
-      - name: Create and upload deployment script
-        run: |
-          echo "📝 Creating deployment script using SSM Parameter Store..."
+      # - name: Create and upload deployment script
+      #   run: |
+      #     echo "📝 Creating deployment script using SSM Parameter Store..."
           
-          cat > deploy-ecr.sh << 'DEPLOY_SCRIPT'
-          #!/bin/bash
-          set -e
+      #     cat > deploy-ecr.sh << 'DEPLOY_SCRIPT'
+      #     #!/bin/bash
+      #     set -e
           
-          TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
-          AWS_REGION="us-east-1"
-          echo "=========================================="
-          echo "[$TIMESTAMP] Starting Docker deployment on $(hostname)"
-          echo "=========================================="
+      #     TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
+      #     AWS_REGION="us-east-1"
+      #     echo "=========================================="
+      #     echo "[$TIMESTAMP] Starting Docker deployment on $(hostname)"
+      #     echo "=========================================="
           
-          cd /opt/wordpress
+      #     cd /opt/wordpress
           
-          # Fetch ECR configuration from SSM Parameter Store
-          echo "[$TIMESTAMP] Fetching ECR configuration from SSM Parameter Store..."
-          ECR_REGISTRY=$(aws ssm get-parameter --name "/abdu_app/ECR_REGISTRY" --query "Parameter.Value" --output text --region $AWS_REGION)
-          ECR_REPOSITORY=$(aws ssm get-parameter --name "/abdu_app/ECR_REPOSITORY" --query "Parameter.Value" --output text --region $AWS_REGION)
-          IMAGE_TAG=$(aws ssm get-parameter --name "/abdu_app/IMAGE_TAG" --query "Parameter.Value" --output text --region $AWS_REGION)
+      #     # Fetch ECR configuration from SSM Parameter Store
+      #     echo "[$TIMESTAMP] Fetching ECR configuration from SSM Parameter Store..."
+      #     ECR_REGISTRY=$(aws ssm get-parameter --name "/abdu_app/ECR_REGISTRY" --query "Parameter.Value" --output text --region $AWS_REGION)
+      #     ECR_REPOSITORY=$(aws ssm get-parameter --name "/abdu_app/ECR_REPOSITORY" --query "Parameter.Value" --output text --region $AWS_REGION)
+      #     IMAGE_TAG=$(aws ssm get-parameter --name "/abdu_app/IMAGE_TAG" --query "Parameter.Value" --output text --region $AWS_REGION)
           
-          if [ -z "$ECR_REGISTRY" ] || [ -z "$ECR_REPOSITORY" ] || [ -z "$IMAGE_TAG" ]; then
-            echo "[$TIMESTAMP] ❌ ERROR: Failed to retrieve complete ECR configuration from SSM"
-            exit 1
-          fi
+      #     if [ -z "$ECR_REGISTRY" ] || [ -z "$ECR_REPOSITORY" ] || [ -z "$IMAGE_TAG" ]; then
+      #       echo "[$TIMESTAMP] ❌ ERROR: Failed to retrieve complete ECR configuration from SSM"
+      #       exit 1
+      #     fi
           
-          echo "[$TIMESTAMP] ✅ Retrieved ECR configuration from SSM"
-          echo "[$TIMESTAMP]    Registry: $ECR_REGISTRY"
-          echo "[$TIMESTAMP]    Repository: $ECR_REPOSITORY"
-          echo "[$TIMESTAMP]    Image Tag: $IMAGE_TAG"
+      #     echo "[$TIMESTAMP] ✅ Retrieved ECR configuration from SSM"
+      #     echo "[$TIMESTAMP]    Registry: $ECR_REGISTRY"
+      #     echo "[$TIMESTAMP]    Repository: $ECR_REPOSITORY"
+      #     echo "[$TIMESTAMP]    Image Tag: $IMAGE_TAG"
           
-          # Login to ECR
-          echo "[$TIMESTAMP] Logging into Amazon ECR..."
-          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+      #     # Login to ECR
+      #     echo "[$TIMESTAMP] Logging into Amazon ECR..."
+      #     aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
           
-          # Pull the new image
-          echo "[$TIMESTAMP] Pulling new image from ECR..."
-          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+      #     # Pull the new image
+      #     echo "[$TIMESTAMP] Pulling new image from ECR..."
+      #     docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           
-          # Stop and remove old containers
-          echo "[$TIMESTAMP] Stopping existing containers..."
-          docker compose down || true
+      #     # Stop and remove old containers
+      #     echo "[$TIMESTAMP] Stopping existing containers..."
+      #     docker compose down || true
           
-          # Remove old images (keep last 3)
-          echo "[$TIMESTAMP] Cleaning up old images..."
-          docker images $ECR_REGISTRY/$ECR_REPOSITORY --format "{{.ID}} {{.Tag}}" | \
-            grep -v "$IMAGE_TAG" | \
-            tail -n +4 | awk '{print $1}' | xargs -r docker rmi || true
+      #     # Remove old images (keep last 3)
+      #     echo "[$TIMESTAMP] Cleaning up old images..."
+      #     docker images $ECR_REGISTRY/$ECR_REPOSITORY --format "{{.ID}} {{.Tag}}" | \
+      #       grep -v "$IMAGE_TAG" | \
+      #       tail -n +4 | awk '{print $1}' | xargs -r docker rmi || true
           
-          # Start containers with new image
-          echo "[$TIMESTAMP] Starting containers with new image..."
-          docker compose up -d
+      #     # Start containers with new image
+      #     echo "[$TIMESTAMP] Starting containers with new image..."
+      #     docker compose up -d
           
-          # Wait for containers to be healthy
-          echo "[$TIMESTAMP] Waiting for containers to be healthy..."
-          sleep 60
+      #     # Wait for containers to be healthy
+      #     echo "[$TIMESTAMP] Waiting for containers to be healthy..."
+      #     sleep 60
           
-          # Check health status
-          MAX_ATTEMPTS=12
-          ATTEMPT=0
+      #     # Check health status
+      #     MAX_ATTEMPTS=12
+      #     ATTEMPT=0
           
-          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-            WP1_HEALTH=$(docker inspect wordpress-app-1 --format='{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
-            WP2_HEALTH=$(docker inspect wordpress-app-2 --format='{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
-            NGINX_HEALTH=$(docker inspect wordpress-lb --format='{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
+      #     while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+      #       WP1_HEALTH=$(docker inspect wordpress-app-1 --format='{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
+      #       WP2_HEALTH=$(docker inspect wordpress-app-2 --format='{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
+      #       NGINX_HEALTH=$(docker inspect wordpress-lb --format='{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
             
-            echo "[$TIMESTAMP] Health status - WP1: $WP1_HEALTH, WP2: $WP2_HEALTH, Nginx: $NGINX_HEALTH"
+      #       echo "[$TIMESTAMP] Health status - WP1: $WP1_HEALTH, WP2: $WP2_HEALTH, Nginx: $NGINX_HEALTH"
             
-            if [ "$WP1_HEALTH" = "healthy" ] && [ "$WP2_HEALTH" = "healthy" ] && [ "$NGINX_HEALTH" = "healthy" ]; then
-              echo "[$TIMESTAMP] ✅ All containers are healthy"
-              break
-            fi
+      #       if [ "$WP1_HEALTH" = "healthy" ] && [ "$WP2_HEALTH" = "healthy" ] && [ "$NGINX_HEALTH" = "healthy" ]; then
+      #         echo "[$TIMESTAMP] ✅ All containers are healthy"
+      #         break
+      #       fi
             
-            ATTEMPT=$((ATTEMPT + 1))
-            echo "[$TIMESTAMP] Waiting for containers to become healthy (attempt $ATTEMPT/$MAX_ATTEMPTS)..."
-            sleep 10
-          done
+      #       ATTEMPT=$((ATTEMPT + 1))
+      #       echo "[$TIMESTAMP] Waiting for containers to become healthy (attempt $ATTEMPT/$MAX_ATTEMPTS)..."
+      #       sleep 10
+      #     done
           
-          # Verify deployment
-          echo "[$TIMESTAMP] Verifying deployment..."
-          if curl -sf http://localhost/health > /dev/null; then
-            echo "[$TIMESTAMP] ✅ Health check passed"
-          else
-            echo "[$TIMESTAMP] ⚠️ Health check warning"
-          fi
+      #     # Verify deployment
+      #     echo "[$TIMESTAMP] Verifying deployment..."
+      #     if curl -sf http://localhost/health > /dev/null; then
+      #       echo "[$TIMESTAMP] ✅ Health check passed"
+      #     else
+      #       echo "[$TIMESTAMP] ⚠️ Health check warning"
+      #     fi
           
-          # Show container status
-          echo "[$TIMESTAMP] Container status:"
-          docker compose ps
+      #     # Show container status
+      #     echo "[$TIMESTAMP] Container status:"
+      #     docker compose ps
           
-          # Show current image tags
-          echo "[$TIMESTAMP] Current images:"
-          docker images $ECR_REGISTRY/$ECR_REPOSITORY
+      #     # Show current image tags
+      #     echo "[$TIMESTAMP] Current images:"
+      #     docker images $ECR_REGISTRY/$ECR_REPOSITORY
           
-          echo "=========================================="
-          echo "[$TIMESTAMP] ✅ Deployment completed successfully on $(hostname)"
-          echo "[$TIMESTAMP] Deployed image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          echo "=========================================="
-          DEPLOY_SCRIPT
+      #     echo "=========================================="
+      #     echo "[$TIMESTAMP] ✅ Deployment completed successfully on $(hostname)"
+      #     echo "[$TIMESTAMP] Deployed image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+      #     echo "=========================================="
+      #     DEPLOY_SCRIPT
           
-          # Upload script to S3 for historical reference (optional)
-          SCRIPT_NAME="deploy-ecr-$(date +%s).sh"
-          aws s3 cp deploy-ecr.sh s3://abdullatif-app/scripts/$SCRIPT_NAME --storage-class STANDARD_IA || true
-          aws s3 cp deploy-ecr.sh s3://abdullatif-app/scripts/latest-deploy-ecr.sh --storage-class STANDARD_IA || true
-          echo "SCRIPT_NAME=$SCRIPT_NAME" >> $GITHUB_ENV
-          echo "✅ Deployment script created (SSM-based)"
+      #     # Upload script to S3 for historical reference (optional)
+      #     SCRIPT_NAME="deploy-ecr-$(date +%s).sh"
+      #     aws s3 cp deploy-ecr.sh s3://abdullatif-app/scripts/$SCRIPT_NAME --storage-class STANDARD_IA || true
+      #     aws s3 cp deploy-ecr.sh s3://abdullatif-app/scripts/latest-deploy-ecr.sh --storage-class STANDARD_IA || true
+      #     echo "SCRIPT_NAME=$SCRIPT_NAME" >> $GITHUB_ENV
+      #     echo "✅ Deployment script created (SSM-based)"
        # - name: Get Auto Scaling Group Instances
       #   id: get-instances
       #   run: |
@@ -313,6 +313,14 @@ jobs:
       #     else
       #       echo "✅ All deployments completed successfully!"
       #     fi
+      # Refresh auto group instances to pull new image
+      - name: Refresh Auto Group Instances
+        run: |
+          echo "Refreshing Auto Group Instances..."
+          aws autoscaling update-auto-scaling-group \
+            --auto-scaling-group-name $ASG_NAME \
+            --health-check-type ELB \
+            --health-check-grace-period 300
       
       - name: Cleanup old ECR images
         if: success()
