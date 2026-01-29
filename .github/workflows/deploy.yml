@@ -317,10 +317,9 @@ jobs:
       - name: Refresh Auto Group Instances
         run: |
           echo "Refreshing Auto Group Instances..."
-          aws autoscaling update-auto-scaling-group \
+          aws autoscaling start-instance-refresh \
             --auto-scaling-group-name $ASG_NAME \
-            --health-check-type ELB \
-            --health-check-grace-period 300
+            --preferences '{"MinHealthyPercentage": 50}'
       
       - name: Cleanup old ECR images
         if: success()
