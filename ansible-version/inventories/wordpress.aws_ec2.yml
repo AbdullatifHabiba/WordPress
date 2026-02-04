@@ -1,0 +1,21 @@
+plugin: amazon.aws.aws_ec2
+aws_access_key: "{{ (lookup('file', 'playbooks/vars.yml') | from_yaml).aws_access_key }}"
+aws_secret_key: "{{ (lookup('file', 'playbooks/vars.yml') | from_yaml).aws_secret_key }}"
+regions:
+  - "{{ (lookup('file', 'playbooks/vars.yml') | from_yaml).aws_region }}"
+filters:
+  tag:Name: "{{ lookup('env', 'INSTANCE_NAME') | default('abdu-ansible-instance', true) }}"
+  instance-state-name: [running]
+hostnames:
+  - public-ip-address
+compose:
+  ansible_host: public_ip_address
+keyed_groups:
+  - key: tags.Name
+    separator: ""
+    prefix: ""
+  - key: tags.Application
+    separator: ""
+    prefix: ""
+  - key: tags.Environment
+    prefix: env

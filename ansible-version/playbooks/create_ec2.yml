@@ -1,0 +1,19 @@
+---
+# Playbook to create EC2 instance for WordPress
+# Run this first: ansible-playbook playbooks/create_ec2.yml
+# All variables are defined in vars.yml
+
+- name: Create EC2 Instance for WordPress
+  hosts: localhost
+  gather_facts: true
+  vars_files:
+    - vars.yml
+  
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_access_key }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_key }}"
+    AWS_DEFAULT_REGION: "{{ aws_region }}"
+  
+  roles:
+    - role: ec2
+      tags: [ec2]

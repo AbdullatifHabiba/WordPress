@@ -1,0 +1,133 @@
+---
+# Role: EC2 Management
+# Purpose: Start, stop, terminate, and query EC2 instances based on tags
+
+- name: "EC2 Management - {{ ec2_action | upper }}"
+  block:
+    # Use ec2_tags directly if it's already a dict, otherwise try to parse it
+    - name: Set tags dict
+      set_fact:
+        ec2_tags_dict: "{{ ec2_tags if ec2_tags is mapping else {} }}"
+      when: ec2_tags is defined
+
+    # Build filters dictionary from tags
+    # Converts: {Environment: production} -> {tag:Environment: production}
+    - name: Build filters from tags
+      set_fact:
+        ec2_filters_dict: "{{ ec2_filters_dict | default({}) | combine({('tag:' + item.key): item.value}) }}"
+      loop: "{{ ec2_tags_dict | dict2items }}"
+      when: ec2_tags_dict is defined and ec2_tags_dict | length > 0
+
+    # Add Name filter if ec2_name is provided
+    - name: Add Name filter
+      set_fact:
+        ec2_filters_dict: "{{ ec2_filters_dict | default({}) | combine({'tag:Name': ec2_name}) }}"
+      when: ec2_name is defined and ec2_name | length > 0
+
+    # Query EC2 instances by tags
+    - name: Query EC2 instances by tags
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        access_key: "{{ aws_access_key }}"
+        secret_key: "{{ aws_secret_key }}"
+        filters: "{{ ec2_filters_dict | default({}) }}"
+      register: ec2_instances
+
+    - name: Display found instances
+      debug:
+        msg: |
+          Found {{ ec2_instances.instances | length }} instance(s) matching filters:
+          {% if ec2_name %}
+            - Name: {{ ec2_name }}
+          {% endif %}
+          {% for tag_key, tag_val in ec2_tags_dict.items() %}
+            - {{ tag_key }}: {{ tag_val }}
+          {% endfor %}
+          
+          Instances:
+          {% for instance in ec2_instances.instances %}
+            - ID: {{ instance.instance_id }}
+              State: {{ instance.state.name }}
+              Type: {{ instance.instance_type }}
+              Tags: {{ instance.tags | default({}) }}
+              Public IP: {{ instance.public_ip_address | default('N/A') }}
+          {% endfor %}
+      when: (verbose | bool) or (ec2_action == 'status')
+
+    # Start instances
+    - name: Start EC2 instances
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"
+        access_key: "{{ aws_access_key }}"
+        secret_key: "{{ aws_secret_key }}"
+        instance_ids: "{{ ec2_instances.instances | map(attribute='instance_id') | list }}"
+        state: started
+        wait: true
+        wait_timeout: "{{ wait_timeout }}"
+      register: start_result
+      when: ec2_action == 'start' and ec2_instances.instances | length > 0
+
+    - name: Display start results
+      debug:
+        msg: |
+          Started {{ start_result.instances | length }} instance(s):
+          {% for instance in start_result.instances %}
+            - {{ instance.instance_id }}: {{ instance.state.name }}
+          {% endfor %}
+      when: ec2_action == 'start' and start_result is defined and start_result.instances is defined
+
+    # Stop instances
+    - name: Stop EC2 instances
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"
+        access_key: "{{ aws_access_key }}"
+        secret_key: "{{ aws_secret_key }}"
+        instance_ids: "{{ ec2_instances.instances | map(attribute='instance_id') | list }}"
+        state: stopped
+        wait: true
+        wait_timeout: "{{ wait_timeout }}"
+      register: stop_result
+      when: ec2_action == 'stop' and ec2_instances.instances | length > 0
+
+    - name: Display stop results
+      debug:
+        msg: |
+          Stopped {{ stop_result.instances | length }} instance(s):
+          {% for instance in stop_result.instances %}
+            - {{ instance.instance_id }}: {{ instance.state.name }}
+          {% endfor %}
+      when: ec2_action == 'stop' and stop_result is defined and stop_result.instances is defined
+
+    # Terminate instances
+    - name: Terminate EC2 instances
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"
+        access_key: "{{ aws_access_key }}"
+        secret_key: "{{ aws_secret_key }}"
+        instance_ids: "{{ ec2_instances.instances | map(attribute='instance_id') | list }}"
+        state: terminated
+        wait: true
+        wait_timeout: "{{ wait_timeout }}"
+      register: terminate_result
+      when: ec2_action == 'terminate' and ec2_instances.instances | length > 0
+
+    - name: Display terminate results
+      debug:
+        msg: |
+          Terminated {{ terminate_result.instances | length }} instance(s):
+          {% for instance in terminate_result.instances %}
+            - {{ instance.instance_id }}: {{ instance.state.name }}
+          {% endfor %}
+      when: ec2_action == 'terminate' and terminate_result is defined and terminate_result.instances is defined
+
+    # Display message when no instances found
+    - name: No instances found message
+      debug:
+        msg: |
+          No EC2 instances found matching the specified tags:
+          {% for tag_key, tag_val in ec2_tags_dict.items() %}
+            - {{ tag_key }}: {{ tag_val }}
+          {% endfor %}
+      when: ec2_instances.instances | length == 0
+
+  delegate_to: localhost

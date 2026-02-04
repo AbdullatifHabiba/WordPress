@@ -1,0 +1,92 @@
+---
+# Role: EC2 management for WordPress
+# Handles provision, start, stop, and terminate
+
+- name: Handle EC2 Instance State
+  block:
+    - name: Get Ubuntu 22.04 LTS AMI
+      amazon.aws.ec2_ami_info:
+        region: "{{ aws_region }}"
+        access_key: "{{ aws_access_key }}"
+        secret_key: "{{ aws_secret_key }}"
+        owners: 099720109477
+        filters:
+          name: "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"
+          state: available
+      register: ubuntu_ami
+      when: ec2_state == 'present'
+
+    - name: Create security group for WordPress
+      amazon.aws.ec2_security_group:
+        name: "{{ instance_name }}-sg"
+        description: Security group for WordPress instance
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ aws_region }}"
+        access_key: "{{ aws_access_key }}"
+        secret_key: "{{ aws_secret_key }}"
+        rules:
+          # Inbound rules
+          - proto: tcp
+            ports: [80, 443, 22, 3000, 9090, 9100, 9104, 8082, 8080]
+            cidr_ip: 0.0.0.0/0
+        rules_egress:
+          # Allow all outbound traffic (needed for apt update, docker pull, etc)
+          - proto: -1
+            cidr_ip: 0.0.0.0/0
+        state: "{{ 'present' if ec2_state != 'absent' else 'absent' }}"
+      register: wordpress_sg
+      when: ec2_state != 'absent' or terminate_sg | default(false)
+
+    - name: Manage EC2 instance
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"
+        access_key: "{{ aws_access_key }}"
+        secret_key: "{{ aws_secret_key }}"
+        key_name: "{{ key_name }}"
+        image_id: "{{ ubuntu_ami.images[0].image_id if ec2_state == 'present' else omit }}"
+        instance_type: "{{ instance_type }}"
+        security_group: "{{ wordpress_sg.group_id if ec2_state != 'absent' else omit }}"
+        subnet_id: "{{ subnet_id if ec2_state == 'present' else omit }}"
+        tags:
+          Name: "{{ instance_name }}"
+          Environment: "{{ deployment_environment }}"
+          Application: wordpress
+        iam_instance_profile: "{{ iam_instance_profile | default(omit) }}"
+        volumes:
+          - device_name: /dev/sda1
+            ebs:
+              volume_size: "{{ root_volume_size | default(20) }}"
+              delete_on_termination: true
+              volume_type: gp3
+        wait: true
+        state: "{{ 'running' if ec2_state == 'present' or ec2_state == 'started' else 'stopped' if ec2_state == 'stopped' else 'absent' }}"
+      register: ec2_output
+
+    - name: Set IP fact and display info
+      set_fact:
+        instance_public_ip: "{{ ec2_output.instances[0].public_ip_address }}"
+      when: ec2_state == 'present' or ec2_state == 'started'
+
+    - name: Wait for SSH to be ready
+      wait_for:
+        host: "{{ instance_public_ip }}"
+        port: 22
+        timeout: 300
+        delay: 5
+        state: started
+      when: instance_public_ip is defined and (ec2_state == 'present' or ec2_state == 'started')
+      delegate_to: localhost
+
+    - name: Print WordPress URL
+      debug:
+        msg: "WordPress will be available at: http://{{ instance_public_ip }}"
+      when: instance_public_ip is defined
+
+    - name: Add host to dynamic inventory
+      add_host:
+        name: "{{ instance_public_ip }}"
+        groups: wordpress_hosts
+        ansible_user: ubuntu
+        ansible_ssh_private_key_file: "{{ key_path }}"
+      when: instance_public_ip is defined and (ec2_state == 'present' or ec2_state == 'started')
+  delegate_to: localhost

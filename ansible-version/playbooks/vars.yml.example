@@ -1,0 +1,85 @@
+---
+# EXAMPLE VARIABLES FILE - COPY AND CUSTOMIZE
+# This is a template. Copy to vars.yml and update with your values
+# DO NOT commit vars.yml with real credentials to Git!
+
+# =====================================================
+# AWS CREDENTIALS
+# =====================================================
+# Get these from: AWS Console → IAM → Users → Your User → Create Access Key
+aws_access_key: "AKIA..."
+aws_secret_key: "wJa..."
+aws_region: us-east-1
+
+# =====================================================
+# EC2 INSTANCE CONFIGURATION
+# =====================================================
+instance_type: t2.micro
+instance_name: wordpress-instance
+instance_role: wordpress
+environment: production
+key_pair_name: "my-keypair"  # Your EC2 key pair name
+
+# =====================================================
+# SECURITY GROUP
+# =====================================================
+security_group_name: wordpress-sg
+security_group_description: "Security group for WordPress instance"
+allowed_ssh_cidr: "0.0.0.0/0"  # RESTRICT in production!
+allowed_http_cidr: "0.0.0.0/0"
+allowed_https_cidr: "0.0.0.0/0"
+
+# =====================================================
+# MYSQL CONFIGURATION
+# =====================================================
+mysql_root_password: "RootPass123!"
+mysql_database: wordpress
+mysql_user: wordpress
+mysql_password: "WordPress123!"
+mysql_port: 3306
+
+# MySQL Backup
+mysql_backup_enabled: true
+mysql_backup_hour: 2
+mysql_backup_minute: 0
+mysql_backup_retention_days: 7
+mysql_backup_user: backup
+mysql_backup_password: "BackupUser123!"
+
+# =====================================================
+# WORDPRESS CONFIGURATION
+# =====================================================
+wordpress_app_dir: /opt/wordpress
+wordpress_db_host: localhost
+wordpress_db_name: wordpress
+wordpress_db_user: wordpress
+wordpress_db_password: "WordPress123!"
+wordpress_site_url: "http://your-domain.com"
+wordpress_site_title: "My WordPress Blog"
+wordpress_admin_user: admin
+wordpress_admin_password: "WordPressAdmin123!"
+wordpress_admin_email: "admin@your-domain.com"
+
+# =====================================================
+# GRAFANA CONFIGURATION
+# =====================================================
+grafana_admin_user: admin
+grafana_admin_password: "Grafana123!"
+
+# =====================================================
+# PROMETHEUS CONFIGURATION
+# =====================================================
+prometheus_scrape_interval: 15s
+prometheus_retention: 15d
+
+# =====================================================
+# BACKUP CONFIGURATION
+# =====================================================
+enable_auto_backup: true
+backup_retention_days: 7
+
+# =====================================================
+# NOTIFICATIONS (Optional)
+# =====================================================
+enable_notifications: false
+notification_email: "admin@your-domain.com"

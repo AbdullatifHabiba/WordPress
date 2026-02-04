@@ -1,0 +1,37 @@
+---
+- name: Docker Engine Implementation
+  block:
+    - name: Ensure Docker is installed (Generic)
+      package:
+        name: docker.io
+        state: present
+      register: docker_install
+      ignore_errors: yes
+
+    - name: Fallback Docker installation for Amazon Linux/Others
+      shell: |
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sh get-docker.sh
+      when: docker_install is failed
+      args:
+        creates: /usr/bin/docker
+
+    - name: Ensure Docker service is started
+      service:
+        name: docker
+        state: started
+        enabled: yes
+    
+    - name: Install required packages for Docker and AWS
+      package:
+        name:
+          - "{{ (ansible_os_family == 'Debian') | ternary('python3-docker', 'python3-docker') }}" # Note: adjust if name differs
+          - awscli
+        state: present
+      when: ansible_os_family == 'Debian' or ansible_os_family == 'RedHat'
+
+    - name: Create Docker Network
+      docker_network:
+        name: "{{ docker_network_name }}"
+        state: present
+  become: yes

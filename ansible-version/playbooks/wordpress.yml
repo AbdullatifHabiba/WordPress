@@ -1,0 +1,69 @@
+---
+- name: AWS Infrastructure Provisioning
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  roles:
+    - vpc
+    - ec2
+    - efs_provision
+  post_tasks:
+    - name: Pass EFS DNS to all hosts
+      set_fact:
+        efs_dns_name: "{{ hostvars['localhost']['efs_dns_name'] }}"
+      delegate_to: localhost
+      delegate_facts: true
+
+- name: Deploy WordPress Stack
+  hosts: wordpress_hosts
+  gather_facts: true
+  become: yes
+  vars_files:
+    - vars.yml
+  vars:
+    # Ensure Docker is available for community modules
+    ansible_python_interpreter: /usr/bin/python3
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_access_key }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_key }}"
+    AWS_DEFAULT_REGION: "{{ aws_region }}"
+  pre_tasks:
+    - name: Wait for SSH to be ready
+      wait_for_connection:
+        timeout: 300
+    - name: Install dependencies
+      apt:
+        name: [python3-pip, git, curl, wget, vim, net-tools, nfs-common]
+        state: present
+        update_cache: yes
+      when: ansible_facts['os_family'] == "Debian"
+  roles:
+    - docker
+    - efs
+    - swap
+    - node_exporter
+    - mysql
+    - wordpress
+    - prometheus
+    - grafana
+    - nginx
+    - letsencrypt
+
+- name: Final Output
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Display machine info
+      debug:
+        msg: |
+          ==================================================
+          WORDPRESS DEPLOYMENT COMPLETED
+          ==================================================
+          WordPress: http://{{ groups['wordpress_hosts'][0] }}
+          Grafana:   http://{{ groups['wordpress_hosts'][0] }}/grafana
+          Prometheus: http://{{ groups['wordpress_hosts'][0] }}/prometheus
+          ==================================================
+      when: groups['wordpress_hosts'] is defined and groups['wordpress_hosts'] | length > 0

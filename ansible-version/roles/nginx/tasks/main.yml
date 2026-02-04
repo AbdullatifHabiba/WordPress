@@ -1,0 +1,31 @@
+---
+- name: Install Nginx
+  package:
+    name: nginx
+    state: present
+  become: yes
+
+- name: Create Nginx configuration
+  template:
+    src: wordpress_proxy.conf.j2
+    dest: /etc/nginx/sites-available/wordpress_proxy
+  become: yes
+
+- name: Enable Nginx configuration
+  file:
+    src: /etc/nginx/sites-available/wordpress_proxy
+    dest: /etc/nginx/sites-enabled/wordpress_proxy
+    state: link
+  become: yes
+
+- name: Remove default Nginx site
+  file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  become: yes
+
+- name: Restart Nginx
+  service:
+    name: nginx
+    state: restarted
+  become: yes

@@ -1,0 +1,33 @@
+---
+# EC2 Management Role Defaults
+
+# EC2 Action: start, stop, terminate, status
+ec2_action: status
+
+# EC2 Instance state: running, stopped, terminated
+# Used to filter instances by state
+ec2_instance_state: running
+
+# Tags to filter EC2 instances
+# Example:
+#   ec2_tags:
+#     Environment: production
+#     Project: wordpress
+ec2_tags: {}
+
+# EC2 Instance Name to filter (searches tag:Name)
+# Example: "web-server" or "abdu-ansible-instance"
+ec2_name: ""
+
+# AWS Region
+aws_region: us-east-1
+
+# AWS Credentials
+aws_access_key: "{{ vault_aws_access_key | default(omit) }}"
+aws_secret_key: "{{ vault_aws_secret_key | default(omit) }}"
+
+# Wait for state change (in seconds)
+wait_timeout: 300
+
+# Verbosity for output
+verbose: false

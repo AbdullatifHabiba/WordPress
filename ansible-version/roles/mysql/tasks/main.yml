@@ -1,0 +1,66 @@
+---
+- name: MySQL Implementation
+  block:
+    - name: Create MySQL directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /opt/mysql
+        - /opt/mysql/data
+        - /opt/mysql/backups
+
+    - name: Run MySQL 8 Container
+      docker_container:
+        name: mysql-db
+        image: mysql:8.0
+        state: started
+        restart_policy: always
+        network_mode: "{{ docker_network_name }}"
+        env:
+          MYSQL_ROOT_PASSWORD: "{{ mysql_root_password }}"
+          MYSQL_DATABASE: "{{ mysql_database }}"
+          MYSQL_USER: "{{ mysql_user }}"
+          MYSQL_PASSWORD: "{{ mysql_password }}"
+        volumes:
+          - /opt/mysql/data:/var/lib/mysql
+        published_ports:
+          - "3306:3306"
+        # MySQL startup parameters
+        # --default-authentication-plugin: Use mysql_native_password for compatibility with older clients/WordPress
+        # --innodb_buffer_pool_size: Memory allocated for data/index caching (set based on instance memory)
+        # For t2.micro (1GB): use 256M. For t2.small+ (2GB+): use 512M-1G
+        command: --default-authentication-plugin=mysql_native_password --innodb_buffer_pool_size={{ mysql_innodb_buffer_pool_size }}
+
+    - name: Create backup script
+      template:
+        src: backup.sh.j2
+        dest: /opt/mysql/backup.sh
+        mode: '0755'
+
+    - name: Create backup cron job
+      cron:
+        name: "MySQL Daily Backup"
+        hour: "2"
+        minute: "0"
+        job: "/opt/mysql/backup.sh"
+        user: root
+
+    - name: Wait for MySQL to be ready
+      wait_for:
+        host: localhost
+        port: 3306
+        timeout: 300
+        state: present
+
+    # - name: Create mysqld_exporter user
+    #   shell: |
+    #     docker exec mysql-db mysql -uroot -p"{{ mysql_root_password }}" -e \
+    #     "CREATE USER IF NOT EXISTS 'exporter'@'%' IDENTIFIED BY 'exporter_password_123'; \
+    #     GRANT PROCESS, REPLICATION CLIENT, SELECT ON *.* TO 'exporter'@'%'; \
+    #     FLUSH PRIVILEGES;"
+    #   retries: 5
+    #   delay: 5
+    #   register: exporter_user_result
+    #   failed_when: exporter_user_result.rc != 0 and 'already exists' not in exporter_user_result.stderr

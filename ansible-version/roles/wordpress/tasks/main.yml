@@ -1,0 +1,53 @@
+---
+- name: WordPress Implementation
+  block:
+    - name: Create WordPress directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "33"
+        group: "33"
+        mode: '0775'
+      loop:
+        - /opt/wordpress
+        - /opt/wordpress/html
+
+    - name: Get ECR login password
+      ansible.builtin.shell: |
+        aws ecr get-login-password --region {{ aws_region }}
+      register: ecr_password_result
+      changed_when: false
+      no_log: true
+
+    - name: Log in to AWS ECR
+      community.docker.docker_login:
+        registry_url: "{{ ecr_registry_url }}"
+        username: AWS
+        password: "{{ ecr_password_result.stdout }}"
+      no_log: true
+
+
+    - name: Run WordPress Container
+      docker_container:
+        name: wordpress-app
+        image: "{{ wordpress_docker_image }}"
+        state: started
+        restart_policy: always
+        network_mode: "{{ docker_network_name }}"
+        env:
+          WORDPRESS_DB_HOST: "mysql-db:3306"
+          WORDPRESS_DB_NAME: "{{ mysql_database }}"
+          WORDPRESS_DB_USER: "{{ mysql_user }}"
+          WORDPRESS_DB_PASSWORD: "{{ mysql_password }}"
+          WORDPRESS_CONFIG_EXTRA: |
+            define('WP_HOME', 'https://{{ domain }}');
+            define('WP_SITEURL', 'https://{{ domain }}');
+            if (strpos($_SERVER['HTTP_X_FORWARDED_PROTO'], 'https') !== false) {
+              $_SERVER['HTTPS'] = 'on';
+            }
+        volumes:
+          - /opt/wordpress/html:/var/www/html
+          - "{{ efs_mount_point }}:/var/www/html/wp-content/uploads"
+        published_ports:
+          - "8080:80"
+  become: yes

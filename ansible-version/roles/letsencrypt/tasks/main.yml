@@ -1,0 +1,43 @@
+---
+- name: Install Certbot and Nginx plugin
+  package:
+    name:
+      - certbot
+      - python3-certbot-nginx
+    state: present
+  become: yes
+
+- name: Create certificate for domain
+  shell: |
+    certbot certonly --nginx \
+      --non-interactive \
+      --agree-tos \
+      --email admin@{{ domain }} \
+      -d {{ domain }}
+  environment:
+    CERTBOT_PREFERRED_CHALLENGES: http
+  ignore_errors: yes
+  become: yes
+
+- name: Update Nginx configuration for SSL
+  template:
+    src: wordpress_proxy_ssl.conf.j2
+    dest: /etc/nginx/sites-available/wordpress_proxy
+  become: yes
+
+- name: Test Nginx configuration
+  shell: nginx -t
+  become: yes
+
+- name: Reload Nginx
+  service:
+    name: nginx
+    state: reloaded
+  become: yes
+
+- name: Enable Certbot auto-renewal timer
+  systemd:
+    name: certbot.timer
+    enabled: yes
+    state: started
+  become: yes

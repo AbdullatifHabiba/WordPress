@@ -1,0 +1,34 @@
+---
+- name: Check if swap file exists
+  stat:
+    path: "{{ swap_file_path }}"
+  register: swap_file_check
+
+- name: Create swap file
+  command: "fallocate -l {{ swap_size_gb }}G {{ swap_file_path }}"
+  when: not swap_file_check.stat.exists
+
+- name: Set swap file permissions
+  file:
+    path: "{{ swap_file_path }}"
+    mode: '0600'
+    owner: root
+    group: root
+
+- name: Setup swap area
+  command: "mkswap {{ swap_file_path }}"
+  when: not swap_file_check.stat.exists
+
+- name: Enable swap file
+  command: "swapon {{ swap_file_path }}"
+  when: not swap_file_check.stat.exists
+
+- name: Ensure swap is persistent in /etc/fstab
+  mount:
+    name: none
+    src: "{{ swap_file_path }}"
+    fstype: swap
+    opts: sw
+    passno: 0
+    dump: 0
+    state: present

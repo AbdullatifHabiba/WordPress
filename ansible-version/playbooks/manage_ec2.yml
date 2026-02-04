@@ -1,0 +1,30 @@
+---
+# Playbook: EC2 Instance Management
+# Purpose: Start, stop, terminate, or query EC2 instances by tags
+# Usage: 
+#   ansible-playbook playbooks/manage_ec2.yml -e "ec2_action=status" -e "ec2_tags={Environment: production}"
+#   Or using YAML:
+#   ansible-playbook playbooks/manage_ec2.yml -e "@vars.yml" -e "ec2_action=status"
+
+- name: EC2 Instance Management
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  
+  vars:
+    # Default action: status (query)
+    # Override with: -e "ec2_action=start|stop|terminate|status"
+    ec2_action: status
+    
+    # Default tags to filter instances - use YAML format
+    # Override with: -e "ec2_tags={Environment: production, Project: wordpress}"
+    ec2_tags:
+      Environment: production
+    
+    # Optional: set verbose output
+    verbose: false
+  
+  roles:
+    - ec2_manage
