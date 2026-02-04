@@ -50,3 +50,5 @@ Thumbs.db
 
 # Instance details
 .instance_details
+# *.pem
+*.pem
