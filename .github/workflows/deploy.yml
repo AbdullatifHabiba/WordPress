@@ -17,7 +17,7 @@ jobs:
     env:
       AWS_REGION: us-east-1
       ECR_REPOSITORY: abdu-wordpress
-      ASG_NAME: abdullatif-asg
+      ASG_NAME: abdullatif-tf-wp-asg
     
     steps:
       - name: Checkout code
