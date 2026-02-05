@@ -11,3 +11,5 @@ wp-config.php
 wp-content/uploads/*
 README.md
 LICENSE
+ansible-version
+
