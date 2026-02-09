@@ -1,4 +1,4 @@
-name: Deploy WordPress Docker to AWS with ECR
+name: Build WordPress Image
 
 on:
   push:
@@ -17,10 +17,9 @@ jobs:
     env:
       AWS_REGION: us-east-1
       ECR_REPOSITORY: abdu-wordpress
-      ASG_NAME: abdullatif-tf-wp-asg
     
     steps:
-      - name: Checkout code
+      - name: Checkout WordPress code
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -28,9 +27,9 @@ jobs:
       - name: Configure AWS credentials using OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
-          role-session-name: GitHubActions-WordPressDeployment
+          role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-WordPressBuild
       
       - name: Verify AWS Identity
         run: |
@@ -49,48 +48,72 @@ jobs:
           IMAGE_TAG: ${{ github.sha }}
         run: |
           echo "🐳 Building Docker image..."
+          echo "Image will be: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           
           # Build the Docker image
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           
+          # Also tag as latest
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          
           echo "📦 Pushing image to ECR..."
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
           
           echo "✅ Image pushed successfully"
-          echo "Image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          
-          # Export for later steps
           echo "IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_ENV
-          echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_ENV
       
-      - name: Update SSM Parameters with Image Information
+      - name: Checkout infrastructure repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.KUSTOMIZE_REPO }}
+          ref: main
+          token: ${{ secrets.GH_PAT }}
+          path: ./k8s-manifests-repo
+
+      - name: Update Kustomize image tag
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          cd ./k8s-manifests-repo/overlays/prod
+          
+          echo "📝 Updating kustomization.yaml with new image tag..."
+          
+          # Update the newTag field in kustomization.yaml
+          sed -i "s/newTag: .*/newTag: ${IMAGE_TAG}/" kustomization.yaml
+          
+          echo "✅ Updated image tag to: ${IMAGE_TAG}"
+          
+          # Show the change
+          echo "Updated kustomization.yaml:"
+          cat kustomization.yaml
+      
+      - name: Commit and push Kustomize changes
         env:
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          echo "🔧 Updating SSM Parameters with new image information..."
+          cd ./k8s-manifests-repo
           
-
-          # Update SSM Parameters with new image information
-          aws ssm put-parameter \
-            --name "/abdu_app/IMAGE_TAG" \
-            --value "$IMAGE_TAG" \
-            --type "String" \
-            --overwrite \
-            --region $AWS_REGION
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          echo "✅ SSM Parameters updated successfully"
-          echo "   ECR_REGISTRY: $ECR_REGISTRY"
-          echo "   ECR_REPOSITORY: $ECR_REPOSITORY"
-          echo "   IMAGE_TAG: $IMAGE_TAG"
-      
-     
-      # Refresh auto group instances to pull new image
-      - name: Refresh Auto Group Instances
-        run: |
-          echo "Refreshing Auto Group Instances..."
-          aws autoscaling start-instance-refresh \
-            --auto-scaling-group-name $ASG_NAME \
-            --preferences '{"MinHealthyPercentage": 50}'
+          git add overlays/prod/kustomization.yaml
+          
+          # Check if there are changes to commit
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: Update WordPress image to ${IMAGE_TAG}" \
+                       -m "Updated by WordPress build workflow" \
+                       -m "Commit: ${{ github.sha }}" \
+                       -m "Triggered by: ${{ github.actor }}"
+            
+            git push origin main
+            
+            echo "✅ Kustomize manifests updated successfully"
+            echo "ArgoCD will automatically sync the changes"
+          fi
       
       - name: Cleanup old ECR images
         if: success()
@@ -100,19 +123,41 @@ jobs:
           # Get image digests sorted by push date, skip the first 10 (most recent)
           IMAGES_TO_DELETE=$(aws ecr describe-images \
             --repository-name $ECR_REPOSITORY \
+            --region $AWS_REGION \
             --query 'sort_by(imageDetails,& imagePushedAt)[:-10].imageDigest' \
             --output text)
           
-          if [ ! -z "$IMAGES_TO_DELETE" ]; then
+          if [ -n "$IMAGES_TO_DELETE" ]; then
             for digest in $IMAGES_TO_DELETE; do
               echo "Deleting image: $digest"
               aws ecr batch-delete-image \
                 --repository-name $ECR_REPOSITORY \
+                --region $AWS_REGION \
                 --image-ids imageDigest=$digest || true
             done
             echo "✅ Old images cleaned up"
           else
-            echo "No old images to delete"
+            echo "ℹ️  No old images to delete"
           fi
-
-   
+      
+      - name: Create deployment summary
+        if: always()
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          echo "## 🐳 WordPress Image Build" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image Tag:** \`${IMAGE_TAG}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**ECR Repository:** \`${ECR_REGISTRY}/${ECR_REPOSITORY}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "### ✅ Deployment Steps" >> $GITHUB_STEP_SUMMARY
+            echo "1. Image built and pushed to ECR" >> $GITHUB_STEP_SUMMARY
+            echo "2. Kustomize manifests updated in k8s-manifests repository" >> $GITHUB_STEP_SUMMARY
+            echo "3. ArgoCD will automatically sync and deploy" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Full Image URI:** \`${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}\`" >> $GITHUB_STEP_SUMMARY
+          fi
