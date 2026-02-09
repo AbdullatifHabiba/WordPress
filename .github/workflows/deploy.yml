@@ -69,50 +69,35 @@ jobs:
           repository: ${{ secrets.KUSTOMIZE_REPO }}
           ref: main
           token: ${{ secrets.GH_PAT }}
-          path: ./k8s-manifests
+          path: infra-repo  
 
+      # 2. Update the image tag
       - name: Update Kustomize image tag
         env:
           IMAGE_TAG: ${{ github.sha }}
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        working-directory: ./infra-repo/overlays/prod 
         run: |
-          cd ./k8s-manifests/overlays/prod
-          
           echo "📝 Updating kustomization.yaml with new image tag..."
-          
-          # Update the newTag field in kustomization.yaml
           sed -i "s/newTag: .*/newTag: ${IMAGE_TAG}/" kustomization.yaml
-          
-          echo "✅ Updated image tag to: ${IMAGE_TAG}"
-          
-          # Show the change
-          echo "Updated kustomization.yaml:"
           cat kustomization.yaml
-      
+
+      # 3. Commit and push
       - name: Commit and push Kustomize changes
         env:
           IMAGE_TAG: ${{ github.sha }}
+        working-directory: ./infra-repo
         run: |
-          cd ./k8s-manifests-repo
-          
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
           git add overlays/prod/kustomization.yaml
           
-          # Check if there are changes to commit
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "chore: Update WordPress image to ${IMAGE_TAG}" \
-                       -m "Updated by WordPress build workflow" \
-                       -m "Commit: ${{ github.sha }}" \
-                       -m "Triggered by: ${{ github.actor }}"
-            
+            git commit -m "chore: Update WordPress image to ${IMAGE_TAG}"
             git push origin main
-            
             echo "✅ Kustomize manifests updated successfully"
-            echo "ArgoCD will automatically sync the changes"
           fi
       
       - name: Cleanup old ECR images
