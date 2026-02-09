@@ -75,13 +75,13 @@ jobs:
       - name: Update Kustomize image tag
         env:
           IMAGE_TAG: ${{ github.sha }}
-        working-directory: ./infra-repo/overlays/prod 
+        # Added 'k8s-manifests' to the path below
+        working-directory: ./infra-repo/k8s-manifests/overlays/prod 
         run: |
           echo "📝 Updating kustomization.yaml with new image tag..."
           sed -i "s/newTag: .*/newTag: ${IMAGE_TAG}/" kustomization.yaml
           cat kustomization.yaml
 
-      # 3. Commit and push
       - name: Commit and push Kustomize changes
         env:
           IMAGE_TAG: ${{ github.sha }}
@@ -90,14 +90,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          git add overlays/prod/kustomization.yaml
+          # Ensure the path to git add is also correct
+          git add k8s-manifests/overlays/prod/kustomization.yaml
           
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
             git commit -m "chore: Update WordPress image to ${IMAGE_TAG}"
             git push origin main
-            echo "✅ Kustomize manifests updated successfully"
           fi
       
       - name: Cleanup old ECR images
