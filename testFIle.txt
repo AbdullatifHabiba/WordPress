@@ -1,1 +1,1 @@
-update with argocd
+update with argocd 7.30
